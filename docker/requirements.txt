@@ -3,3 +3,5 @@ imageio[ffmpeg]>=2.37,<3
 numpy<2.3
 pyyaml>=6,<7
 pytest>=8,<9
+zxing-cpp==3.1.1
+pillow>=10,<12

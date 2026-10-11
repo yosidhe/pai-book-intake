@@ -21,6 +21,7 @@ services:
               capabilities: [gpu]
     environment:
       PYOPENGL_PLATFORM: egl
+      PYTHONPATH: /workspace/spikes:/workspace/src
       NVIDIA_DRIVER_CAPABILITIES: all
     shm_size: 4gb
 
