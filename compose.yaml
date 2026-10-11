@@ -1,0 +1,25 @@
+services:
+  sim:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    image: pai-book-intake-sim
+    working_dir: /workspace
+    volumes:
+      - .:/workspace
+      # 学習データ・描画・チェックポイントは OneDrive の外（named volume）に置く
+      - pai-outputs:/workspace/outputs
+    env_file:
+      - path: .env
+        required: false
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    shm_size: 4gb
+
+volumes:
+  pai-outputs:

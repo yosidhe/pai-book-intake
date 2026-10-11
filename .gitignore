@@ -1,0 +1,9 @@
+.env
+.secrets/
+__pycache__/
+*.pyc
+.venv/
+outputs/
+data/
+artifacts/
+*.mp4
