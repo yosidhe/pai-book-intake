@@ -19,6 +19,9 @@ services:
             - driver: nvidia
               count: all
               capabilities: [gpu]
+    environment:
+      PYOPENGL_PLATFORM: egl
+      NVIDIA_DRIVER_CAPABILITIES: all
     shm_size: 4gb
 
 volumes:
