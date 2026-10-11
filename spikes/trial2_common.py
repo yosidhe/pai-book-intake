@@ -30,14 +30,15 @@ PLUNGER_STROKE = 0.08
 CUP_TIP_EXTENDED_Z = CUP_TIP_RETRACTED_Z + PLUNGER_STROKE  # 0.22
 FINGER_OPEN = 0.105
 
-# dof の並び: 腕 0-6 / 左指 7 / 右指 8 / プランジャ 9
+# dof の並び: 腕 0-6 / 左指 7 / 右指 8 / 右指の上下 9 / プランジャ 10
 ARM = np.arange(7)
 FINGERS = np.array([7, 8])
-PLUNGER = 9
-KP = np.array([4500, 4500, 3500, 3500, 2000, 2000, 2000, 8000, 8000, 3000], dtype=float)  # 指は強め（把持力が上限 60 N まで出るように）
-KV = np.array([450, 450, 350, 350, 200, 200, 200, 100, 100, 150], dtype=float)
-FORCE = np.array([87, 87, 87, 87, 12, 12, 12, 60, 60, 40], dtype=float)  # 指の把持力は最大 60 N
-HOME = np.array([0.0, -0.3, 0.0, -2.0, 0.0, 1.75, -0.785, FINGER_OPEN, FINGER_OPEN, PLUNGER_STROKE])
+LIFT = 9
+PLUNGER = 10
+KP = np.array([4500, 4500, 3500, 3500, 2000, 2000, 2000, 8000, 8000, 8000, 3000], dtype=float)  # 指は強め（把持力が上限 60 N まで出るように）
+KV = np.array([450, 450, 350, 350, 200, 200, 200, 100, 100, 100, 150], dtype=float)
+FORCE = np.array([87, 87, 87, 87, 12, 12, 12, 60, 60, 60, 40], dtype=float)  # 指の把持力は最大 60 N
+HOME = np.array([0.0, -0.3, 0.0, -2.0, 0.0, 1.75, -0.785, FINGER_OPEN, FINGER_OPEN, 0.0, PLUNGER_STROKE])
 
 # 本の表面ごとの性質（摩擦係数・吸着力の上限 N）。本の重さは既定密度で約 4.9 N
 SURFACES = {
@@ -45,7 +46,24 @@ SURFACES = {
     "rough": {"friction": 0.9, "suction_max_n": 3.0, "color": (0.45, 0.55, 0.30)},
 }
 
-GRIPPER_XML = f"""
+LIP_LEN = 0.025  # v2 の右の爪の長さ（内側へ張り出す）
+LIP_T = 0.003  # 爪の厚み
+
+
+def gripper_xml(rounded: bool) -> str:
+    """自作グリッパの MJCF。rounded=True（v2）は、右の指先に内側へ 2.5 cm 張り出した薄い爪を付ける。
+    爪の先端は丸く、わずかに反り上がっている（本の下に滑り込ませるため）。左の指は平らな先端のまま（本を押さえる役）。
+    右の指には上下（手先方向）に ±3 cm 動く関節がある（v1 では 0 に固定して使う）。"""
+    def tip(sign: int) -> str:
+        if not rounded or sign > 0:
+            return ""
+        # 右の指の内側は +y。爪は指先（z = FINGER_LEN）の先に、厚み LIP_T で付ける
+        yc, zc = LIP_LEN / 2, FINGER_LEN + LIP_T / 2
+        return (f'<geom type="box" size="0.03 {LIP_LEN / 2} {LIP_T / 2}" pos="0 {yc} {zc}" euler="-0.14 0 0"'
+                ' friction="0.5 0.01 0.001" rgba="0.95 0.75 0.20 1"/>'
+                f'<geom type="capsule" fromto="-0.03 {LIP_LEN:.4f} {zc - 0.0035:.4f} 0.03 {LIP_LEN:.4f} {zc - 0.0035:.4f}"'
+                f' size="{LIP_T / 2}" friction="0.5 0.01 0.001" rgba="0.95 0.75 0.20 1"/>')
+    return f"""
 <body name="gripper" pos="0 0 0">
   <inertial mass="0.6" pos="0 0 0.03" diaginertia="0.002 0.002 0.001"/>
   <geom name="palm" type="box" size="0.03 0.13 0.02" pos="0 0 0.02" rgba="0.30 0.30 0.32 1"/>
@@ -54,12 +72,18 @@ GRIPPER_XML = f"""
     <joint name="finger_l_joint" type="slide" axis="0 1 0" range="0 {FINGER_OPEN}" damping="5" armature="0.1"/>
     <geom type="box" size="0.03 0.006 {FINGER_LEN / 2}" pos="0 0.006 {FINGER_LEN / 2}"
           friction="1.5 0.01 0.001" rgba="0.85 0.85 0.85 1"/>
+    {tip(+1)}
   </body>
   <body name="finger_r" pos="0 0 {FINGER_BASE_Z}">
-    <inertial mass="0.05" pos="0 -0.006 0.07" diaginertia="1e-4 1e-4 1e-5"/>
+    <inertial mass="0.02" pos="0 0 0" diaginertia="1e-5 1e-5 1e-5"/>
     <joint name="finger_r_joint" type="slide" axis="0 -1 0" range="0 {FINGER_OPEN}" damping="5" armature="0.1"/>
-    <geom type="box" size="0.03 0.006 {FINGER_LEN / 2}" pos="0 -0.006 {FINGER_LEN / 2}"
-          friction="1.5 0.01 0.001" rgba="0.85 0.85 0.85 1"/>
+    <body name="finger_r_tip" pos="0 0 0">
+      <inertial mass="0.05" pos="0 -0.006 0.07" diaginertia="1e-4 1e-4 1e-5"/>
+      <joint name="finger_r_lift" type="slide" axis="0 0 1" range="-0.03 0.03" damping="5" armature="0.1"/>
+      <geom type="box" size="0.03 0.006 {FINGER_LEN / 2}" pos="0 -0.006 {FINGER_LEN / 2}"
+            friction="1.5 0.01 0.001" rgba="0.85 0.85 0.85 1"/>
+      {tip(-1)}
+    </body>
   </body>
   <body name="plunger" pos="0 0 {FINGER_BASE_Z}">
     <inertial mass="0.03" pos="0 0 0.05" diaginertia="2e-5 2e-5 1e-6"/>
@@ -72,16 +96,16 @@ GRIPPER_XML = f"""
 """
 
 
-def build_robot_xml(out_dir: Path) -> Path:
+def build_robot_xml(out_dir: Path, rounded: bool = False) -> Path:
     """Genesis 同梱の panda_nohand.xml（Apache-2.0）に自作グリッパを取り付けた MJCF を実行時に生成する。"""
     src_dir = Path(gs.__file__).parent / "assets" / "xml" / "franka_emika_panda"
     xml = (src_dir / "panda_nohand.xml").read_text()
     xml = re.sub(r'meshdir="[^"]*"', f'meshdir="{src_dir / "assets"}"', xml, count=1)
     anchor = '<site name="attachment_site"/>'
     assert anchor in xml
-    xml = xml.replace(anchor, anchor + GRIPPER_XML, 1)
+    xml = xml.replace(anchor, anchor + gripper_xml(rounded), 1)
     xml = re.sub(r"<keyframe>.*?</keyframe>", "", xml, flags=re.S)
-    path = out_dir / "panda_book_gripper.xml"
+    path = out_dir / ("panda_book_gripper_v2.xml" if rounded else "panda_book_gripper.xml")
     path.write_text(xml)
     return path
 
@@ -144,12 +168,12 @@ class Robot:
         self.scene, self.e, self.n = scene, entity, n_envs
         self.gripper = entity.get_link("gripper")
         self.plunger = entity.get_link("plunger")
-        self.finger_links = {entity.get_link("finger_l").idx, entity.get_link("finger_r").idx}
+        self.finger_links = {entity.get_link("finger_l").idx, entity.get_link("finger_r_tip").idx}
         self.target = np.tile(HOME, (n_envs, 1))
         self.suction = None  # Suction を後から差す
 
     def setup(self) -> None:
-        dofs = np.arange(10)
+        dofs = np.arange(len(HOME))
         self.e.set_dofs_kp(KP, dofs)
         self.e.set_dofs_kv(KV, dofs)
         self.e.set_dofs_force_range(-FORCE, FORCE, dofs)
