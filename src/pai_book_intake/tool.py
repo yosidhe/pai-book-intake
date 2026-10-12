@@ -5,6 +5,8 @@
   - 右の指先に内側へ 2.5 cm 張り出した薄い爪（本の下に滑り込ませる用。試行3 の scoop）と、上下 ±3 cm の関節
   - 中央の吸盤: プランジャで 0〜0.08 m 伸縮する。伸ばすと指先より 0.04 m 先に出る
   - 吸着は補助。吸盤が本に接している間だけ、上限つきの力で本を吸盤側へ引く（表面ごとに上限が違う）
+  - 手の形（爪の長さ・厚み・先端・左右など）は hand_design.HandDesign で変えられる（試行5）。
+    build_robot_xml(design=...) で作る。省略すると従来どおり v2（rounded=False なら v1）。dof の並びは変わらない
 
 試行との違い
   - 1 つのシーンにロボットが 2 台ある。シーンを 1 歩進めるのは World.step だけにし、
@@ -21,6 +23,8 @@ import numpy as np
 import genesis as gs
 
 from .geometry import down_quat_branch, quat_to_mat, wrap_pi, wrist_psi
+from .hand_design import V1, V2, HandDesign, insert_into_robot_xml, xml_file_name
+from .hand_design import gripper_xml as hand_gripper_xml
 
 # 自作グリッパの寸法（gripper リンク座標。z が手先方向）
 FINGER_BASE_Z = 0.04
@@ -45,63 +49,34 @@ HOME = np.array([0.0, -0.3, 0.0, -2.0, 0.0, 1.75, -0.785, FINGER_OPEN, FINGER_OP
 GRIP_LIMIT_ROUGH_N = 25.0  # ざらざらの本は把持力を抑える（試行3）
 
 
-def gripper_xml(rounded: bool = True) -> str:
-    """自作グリッパの MJCF。rounded=True（v2）は右の指先に爪を付ける。"""
-    def tip(sign: int) -> str:
-        if not rounded or sign > 0:
-            return ""
-        yc, zc = LIP_LEN / 2, FINGER_LEN + LIP_T / 2
-        return (f'<geom type="box" size="0.03 {LIP_LEN / 2} {LIP_T / 2}" pos="0 {yc} {zc}" euler="-0.14 0 0"'
-                ' friction="0.5 0.01 0.001" rgba="0.95 0.75 0.20 1"/>'
-                f'<geom type="capsule" fromto="-0.03 {LIP_LEN:.4f} {zc - 0.0035:.4f} 0.03 {LIP_LEN:.4f} {zc - 0.0035:.4f}"'
-                f' size="{LIP_T / 2}" friction="0.5 0.01 0.001" rgba="0.95 0.75 0.20 1"/>')
-    return f"""
-<body name="gripper" pos="0 0 0">
-  <inertial mass="0.6" pos="0 0 0.03" diaginertia="0.002 0.002 0.001"/>
-  <geom name="palm" type="box" size="0.03 0.13 0.02" pos="0 0 0.02" rgba="0.30 0.30 0.32 1"/>
-  <body name="finger_l" pos="0 0 {FINGER_BASE_Z}">
-    <inertial mass="0.05" pos="0 0.006 0.07" diaginertia="1e-4 1e-4 1e-5"/>
-    <joint name="finger_l_joint" type="slide" axis="0 1 0" range="0 {FINGER_OPEN}" damping="5" armature="0.1"/>
-    <geom type="box" size="0.03 0.006 {FINGER_LEN / 2}" pos="0 0.006 {FINGER_LEN / 2}"
-          friction="1.5 0.01 0.001" rgba="0.85 0.85 0.85 1"/>
-    {tip(+1)}
-  </body>
-  <body name="finger_r" pos="0 0 {FINGER_BASE_Z}">
-    <inertial mass="0.02" pos="0 0 0" diaginertia="1e-5 1e-5 1e-5"/>
-    <joint name="finger_r_joint" type="slide" axis="0 -1 0" range="0 {FINGER_OPEN}" damping="5" armature="0.1"/>
-    <body name="finger_r_tip" pos="0 0 0">
-      <inertial mass="0.05" pos="0 -0.006 0.07" diaginertia="1e-4 1e-4 1e-5"/>
-      <joint name="finger_r_lift" type="slide" axis="0 0 1" range="-0.03 0.03" damping="5" armature="0.1"/>
-      <geom type="box" size="0.03 0.006 {FINGER_LEN / 2}" pos="0 -0.006 {FINGER_LEN / 2}"
-            friction="1.5 0.01 0.001" rgba="0.85 0.85 0.85 1"/>
-      {tip(-1)}
-    </body>
-  </body>
-  <body name="plunger" pos="0 0 {FINGER_BASE_Z}">
-    <inertial mass="0.03" pos="0 0 0.05" diaginertia="2e-5 2e-5 1e-6"/>
-    <joint name="plunger_joint" type="slide" axis="0 0 1" range="0 {PLUNGER_STROKE}" damping="5" armature="0.1"/>
-    <geom type="cylinder" size="0.005 0.045" pos="0 0 0.045" contype="0" conaffinity="0" rgba="0.2 0.2 0.2 1"/>
-    <geom name="cup" type="cylinder" size="0.016 0.005" pos="0 0 {CUP_TIP_RETRACTED_Z - FINGER_BASE_Z - 0.005}"
-          friction="1.0 0.01 0.001" rgba="0.10 0.40 0.90 1"/>
-  </body>
-</body>
-"""
+def gripper_xml(rounded: bool = True, design: HandDesign | None = None) -> str:
+    """自作グリッパの MJCF。design を省略すると rounded=True は v2（右の指先に爪）、False は v1（爪なし）。
+    形の定義と MJCF の生成は hand_design.py（Genesis なしでテストできる）。"""
+    return hand_gripper_xml(design if design is not None else (V2 if rounded else V1))
 
 
-def build_robot_xml(out_dir: Path, rounded: bool = True) -> Path:
+def build_robot_xml(out_dir: Path, rounded: bool = True, design: HandDesign | None = None) -> Path:
     """Genesis 同梱の panda_nohand.xml（Apache-2.0）に自作グリッパを取り付けた MJCF を実行時に生成する。
-    生成物は実行の出力先（named volume）に置く（同梱アセットの絶対パスを含むため、リポジトリには置かない）。"""
+    生成物は実行の出力先（named volume）に置く（同梱アセットの絶対パスを含むため、リポジトリには置かない）。
+    design を省略すると従来どおり（rounded=True は v2、False は v1）。"""
+    d = design if design is not None else (V2 if rounded else V1)
     src_dir = Path(gs.__file__).parent / "assets" / "xml" / "franka_emika_panda"
     xml = (src_dir / "panda_nohand.xml").read_text()
     xml = re.sub(r'meshdir="[^"]*"', f'meshdir="{src_dir / "assets"}"', xml, count=1)
-    anchor = '<site name="attachment_site"/>'
-    if anchor not in xml:
+    if '<site name="attachment_site"/>' not in xml:
         raise RuntimeError("panda_nohand.xml に attachment_site が無い（Genesis の版が想定と違う）")
-    xml = xml.replace(anchor, anchor + gripper_xml(rounded), 1)
+    xml = insert_into_robot_xml(xml, d)
     xml = re.sub(r"<keyframe>.*?</keyframe>", "", xml, flags=re.S)
-    path = Path(out_dir) / ("panda_book_gripper_v2.xml" if rounded else "panda_book_gripper.xml")
+    path = Path(out_dir) / xml_file_name(d)
     path.write_text(xml)
     return path
+
+
+def home_for(design: HandDesign) -> np.ndarray:
+    """手の形に合わせた待機姿勢（指は開き切る）。"""
+    h = HOME.copy()
+    h[FINGERS] = design.finger_open_m
+    return h
 
 
 class World:
