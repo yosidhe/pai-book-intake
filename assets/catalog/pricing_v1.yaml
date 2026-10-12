@@ -1,0 +1,107 @@
+# 書籍カタログ v1 の手書き入力（架空の値）。書誌そのもの（題名・著者・出版者・年・ページ数・大きさ）はここに書かない。
+# 書誌は tools/fetch_ndl.py が国立国会図書館サーチから取得し、tools/build_catalog.py がこのファイルと突き合わせる。
+#
+# - 価格・状態・表面・重さの誤差はすべて架空。特定の店舗やマーケットプレイスの価格は参照していない。
+#   「一般的な中古書店の傾向」（流通量の多い古い文庫は値が付きにくい、全集・大型本は値が残りやすい、
+#   水濡れ・書き込みは買い取れない）を一般知識として大まかに写しただけ。
+# - base_buyback_yen: 美品（状態 A）だったときの架空の買取価格（円）
+# - condition: A 美品 / B 良好 / C 可（ヤケ・スレ） / D 難あり（水濡れ・書き込み。買取不可）
+# - surface: 表紙の表面（シミュレーションの摩擦などに使う）。smooth=つや・PP 加工 / rough=布・マット紙
+# - weight_true_error: 本当の重さ = 推定重さ × (1 + この値)。架空。±0.05〜0.15 の範囲
+# - label_ascii: ダミー表紙に印字する短いローマ字ラベル（日本語フォントを使わないため）
+
+schema: pai-book-intake/pricing/v1
+
+decision_rule:
+  # 査定の規則: buyback_yen = round(base_buyback_yen × condition_factor)
+  # buyback_yen >= shelf_threshold_yen なら shelf（棚に並べる）、それ未満なら discard（回収箱）
+  shelf_threshold_yen: 50
+  # |buyback_yen - しきい値| <= この幅なら「境界ぎりぎり」として印を付ける（判定には使わない）
+  borderline_margin_yen: 12
+  condition_factor:
+    A: 1.0
+    B: 0.8
+    C: 0.5
+    D: 0.0
+
+books:
+  - id: book-01
+    isbn: "4003101014"
+    label_ascii: "WAGAHAI WA NEKO DE ARU"
+    base_buyback_yen: 30
+    condition: B
+    surface: rough
+    weight_true_error: 0.07
+    expected_decision: discard
+  - id: book-02
+    isbn: "4003103777"
+    label_ascii: "KAKI NO TANE"
+    base_buyback_yen: 50
+    condition: A
+    surface: rough
+    weight_true_error: -0.09
+    expected_decision: shelf
+  - id: book-03
+    isbn: "4003107632"
+    label_ascii: "GINGA TETSUDO NO YORU"
+    base_buyback_yen: 80
+    condition: A
+    surface: smooth
+    weight_true_error: 0.12
+    expected_decision: shelf
+  - id: book-04
+    isbn: "4167158027"
+    label_ascii: "KOKORO / BOTCHAN"
+    base_buyback_yen: 20
+    condition: C
+    surface: smooth
+    weight_true_error: -0.06
+    expected_decision: discard
+  - id: book-05
+    isbn: "4121600428"
+    label_ascii: "GAKUMON NO SUSUME"
+    base_buyback_yen: 120
+    condition: B
+    surface: smooth
+    weight_true_error: 0.10
+    expected_decision: shelf
+  - id: book-06
+    isbn: "9784837925125"
+    label_ascii: "BUSHIDO"
+    base_buyback_yen: 60
+    condition: B
+    surface: smooth
+    weight_true_error: -0.13
+    expected_decision: discard
+  - id: book-07
+    isbn: "4000912550"
+    label_ascii: "AKUTAGAWA SHOSETSU-SHU 1"
+    base_buyback_yen: 150
+    condition: C
+    surface: rough
+    weight_true_error: 0.08
+    expected_decision: shelf
+  - id: book-08
+    isbn: "9784000928298"
+    label_ascii: "TEIHON SOSEKI ZENSHU 9"
+    base_buyback_yen: 600
+    condition: A
+    surface: rough
+    weight_true_error: -0.11
+    expected_decision: shelf
+  - id: book-09
+    isbn: "4480710604"
+    label_ascii: "DAZAI ZENSHU 10"
+    base_buyback_yen: 250
+    condition: D
+    surface: rough
+    weight_true_error: 0.14
+    expected_decision: discard
+  - id: book-10
+    isbn: "480749905X"
+    label_ascii: "THE DAZAI OSAMU"
+    base_buyback_yen: 300
+    condition: B
+    surface: smooth
+    weight_true_error: -0.05
+    expected_decision: shelf

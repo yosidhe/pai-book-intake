@@ -1,0 +1,659 @@
+{
+  "provenance": {
+    "artifactId": "pai-book-intake/catalog/books",
+    "version": "v1",
+    "generatedAt": "2026-10-11T11:28:32+00:00",
+    "generatedBy": "tools/build_catalog.py",
+    "inputs": [
+      "assets/catalog/pricing_v1.yaml",
+      "outputs/ndl_raw/manifest.json"
+    ],
+    "sources": [
+      {
+        "name": "国立国会図書館サーチ（NDL サーチ）SRU API による国立国会図書館書誌データ",
+        "endpoint": "https://ndlsearch.ndl.go.jp/api/sru",
+        "dpid": "iss-ndl-opac",
+        "license": "CC BY 4.0 互換（国立国会図書館が作成し提供する書誌データの二次利用条件）",
+        "license_url": "https://creativecommons.org/licenses/by/4.0/deed.ja",
+        "terms_urls": [
+          "https://ndlsearch.ndl.go.jp/help/api",
+          "https://ndlsearch.ndl.go.jp/help/api/provider",
+          "https://www.ndl.go.jp/jp/data/data_service/quickguide/index.html"
+        ],
+        "attribution_text": "出典：国立国会図書館書誌データ（2026-10-11に取得）。国立国会図書館サーチのAPIを利用。題名・著者・出版者・出版年・ページ数・大きさの項目を抜き出して整形し、寸法・推定重さは大きさとページ数から本プロジェクトが計算した（国立国会図書館が作成したものではない）。",
+        "retrievedOn": [
+          "2026-10-11"
+        ]
+      },
+      {
+        "name": "assets/catalog/pricing_v1.yaml（手書き）",
+        "license": "このリポジトリの一部",
+        "note": "買取価格・状態・表面・本当の重さの誤差はすべて架空"
+      }
+    ],
+    "status": "draft",
+    "classification": "public",
+    "notes": [
+      "書誌（題名・著者・出版者・年・ページ数・大きさ）は国立国会図書館書誌データ。国立国会図書館が作成した書誌（R100000002）だけを使う。",
+      "価格・状態・weight_g_true は架空。特定の店舗やマーケットプレイスの価格は参照せず、中古書の一般的な傾向を一般知識として大まかに写した。",
+      "寸法は NDL の大きさ（高さ cm・切り上げ）から一般的な判型を当てはめ、厚さはページ数と紙厚の仮定から計算した。式は weight_model と tools/catalog_model.py。",
+      "表紙はプロジェクトで作るダミー（tools/make_covers.py）。実在の書影は使わない。"
+    ]
+  },
+  "weight_model": {
+    "version": "weight_v1",
+    "leaf_thickness_mm": {
+      "bunko": 0.075,
+      "shinsho": 0.075,
+      "default": 0.09
+    },
+    "cover_thickness_mm": {
+      "soft": 0.3,
+      "hard": 2.5
+    },
+    "paper_density_g_cm3": 0.75,
+    "cover_areal_density_g_m2": {
+      "soft": 250,
+      "hard": 1200
+    },
+    "formula": "leaves = ceil(pages / 2); block_mm = leaves * leaf_thickness_mm[format]; t_mm = block_mm + 2 * cover_thickness_mm[binding]; weight_g = (h_mm*w_mm*block_mm/1000) * paper_density_g_cm3 + 2 * (h_mm*w_mm/1e6) * cover_areal_density_g_m2[binding]"
+  },
+  "format_table": {
+    "15": {
+      "format": "bunko",
+      "format_ja": "文庫（A6）",
+      "h_mm": 148,
+      "w_mm": 105,
+      "binding": "soft"
+    },
+    "16": {
+      "format": "bunko",
+      "format_ja": "文庫（やや大きめ）",
+      "h_mm": 152,
+      "w_mm": 106,
+      "binding": "soft"
+    },
+    "18": {
+      "format": "shinsho",
+      "format_ja": "新書判",
+      "h_mm": 173,
+      "w_mm": 105,
+      "binding": "soft"
+    },
+    "19": {
+      "format": "shiroku",
+      "format_ja": "四六判（並製）",
+      "h_mm": 188,
+      "w_mm": 127,
+      "binding": "soft"
+    },
+    "20": {
+      "format": "shiroku_hard",
+      "format_ja": "四六判（上製）",
+      "h_mm": 194,
+      "w_mm": 133,
+      "binding": "hard"
+    },
+    "21": {
+      "format": "a5",
+      "format_ja": "A5判（上製）",
+      "h_mm": 210,
+      "w_mm": 148,
+      "binding": "hard"
+    },
+    "26": {
+      "format": "b5",
+      "format_ja": "B5判（並製）",
+      "h_mm": 257,
+      "w_mm": 182,
+      "binding": "soft"
+    }
+  },
+  "decision_rule": {
+    "shelf_threshold_yen": 50,
+    "borderline_margin_yen": 12,
+    "condition_factor": {
+      "A": 1.0,
+      "B": 0.8,
+      "C": 0.5,
+      "D": 0.0
+    },
+    "formula": "buyback_yen = round(base_buyback_yen * condition_factor[condition]); decision = 'shelf' if buyback_yen >= shelf_threshold_yen else 'discard'"
+  },
+  "books": [
+    {
+      "id": "book-01",
+      "isbn13": "9784003101018",
+      "ean13": "9784003101018",
+      "bib": {
+        "title": "吾輩は猫である",
+        "volume": null,
+        "series": "岩波文庫",
+        "creators": [
+          "夏目, 漱石, 1867-1916"
+        ],
+        "responsibility": [
+          "夏目漱石 作"
+        ],
+        "publisher": "岩波書店",
+        "date": "1990.4",
+        "year": 1990,
+        "extent": "563p ; 15cm",
+        "isbn_as_recorded": "4-00-310101-4",
+        "ndl_bib_id": "000002041889",
+        "ndl_url": "https://ndlsearch.ndl.go.jp/books/R100000002-I000002041889",
+        "fetched_at": "2026-10-11T11:26:05+00:00",
+        "raw_file": "outputs/ndl_raw/9784003101018.xml",
+        "raw_sha256": "e67c044893c94490c4f64a33534c0eb9a215f20b25e7b9f71d16066fdeb2d084"
+      },
+      "physical": {
+        "pages": 563,
+        "height_cm_ndl": 15,
+        "format": "bunko",
+        "format_ja": "文庫（A6）",
+        "binding": "soft",
+        "dims_mm": {
+          "h": 148,
+          "w": 105,
+          "t": 21.8
+        },
+        "weight_g_estimated": 254.3,
+        "weight_g_true": 272.1,
+        "weight_true_error": 0.07,
+        "surface": "rough"
+      },
+      "appraisal": {
+        "condition": "B",
+        "condition_factor": 0.8,
+        "base_buyback_yen": 30,
+        "buyback_yen": 24,
+        "expected_decision": "discard",
+        "borderline": false
+      },
+      "cover": {
+        "label_ascii": "WAGAHAI WA NEKO DE ARU"
+      }
+    },
+    {
+      "id": "book-02",
+      "isbn13": "9784003103777",
+      "ean13": "9784003103777",
+      "bib": {
+        "title": "柿の種",
+        "volume": null,
+        "series": "岩波文庫",
+        "creators": [
+          "寺田, 寅彦, 1878-1935"
+        ],
+        "responsibility": [
+          "寺田寅彦 著"
+        ],
+        "publisher": "岩波書店",
+        "date": "1996.4",
+        "year": 1996,
+        "extent": "310p ; 15cm",
+        "isbn_as_recorded": "4-00-310377-7",
+        "ndl_bib_id": "000002501494",
+        "ndl_url": "https://ndlsearch.ndl.go.jp/books/R100000002-I000002501494",
+        "fetched_at": "2026-10-11T11:26:12+00:00",
+        "raw_file": "outputs/ndl_raw/9784003103777.xml",
+        "raw_sha256": "28e5ce4ce68ef0c75c0e2442f2babf674e2b2ee609cd31e0d0748c2eca7f99c7"
+      },
+      "physical": {
+        "pages": 310,
+        "height_cm_ndl": 15,
+        "format": "bunko",
+        "format_ja": "文庫（A6）",
+        "binding": "soft",
+        "dims_mm": {
+          "h": 148,
+          "w": 105,
+          "t": 12.2
+        },
+        "weight_g_estimated": 143.3,
+        "weight_g_true": 130.4,
+        "weight_true_error": -0.09,
+        "surface": "rough"
+      },
+      "appraisal": {
+        "condition": "A",
+        "condition_factor": 1.0,
+        "base_buyback_yen": 50,
+        "buyback_yen": 50,
+        "expected_decision": "shelf",
+        "borderline": true
+      },
+      "cover": {
+        "label_ascii": "KAKI NO TANE"
+      }
+    },
+    {
+      "id": "book-03",
+      "isbn13": "9784003107638",
+      "ean13": "9784003107638",
+      "bib": {
+        "title": "銀河鉄道の夜 : 他十四篇 : 童話集",
+        "volume": null,
+        "series": "岩波文庫",
+        "creators": [
+          "宮沢, 賢治, 1896-1933",
+          "谷川, 徹三, 1895-1989"
+        ],
+        "responsibility": [
+          "宮沢賢治 作",
+          "谷川徹三 編"
+        ],
+        "publisher": "岩波書店",
+        "date": "2007.4",
+        "year": 2007,
+        "extent": "401p ; 15cm",
+        "isbn_as_recorded": "4-00-310763-2",
+        "ndl_bib_id": "000009185963",
+        "ndl_url": "https://ndlsearch.ndl.go.jp/books/R100000002-I000009185963",
+        "fetched_at": "2026-10-11T11:26:14+00:00",
+        "raw_file": "outputs/ndl_raw/9784003107638.xml",
+        "raw_sha256": "17813e6f424715e7f9afd99ba29f987bce5bbb2b27b12b7de7d18f1ee119b3d2"
+      },
+      "physical": {
+        "pages": 401,
+        "height_cm_ndl": 15,
+        "format": "bunko",
+        "format_ja": "文庫（A6）",
+        "binding": "soft",
+        "dims_mm": {
+          "h": 148,
+          "w": 105,
+          "t": 15.7
+        },
+        "weight_g_estimated": 183.5,
+        "weight_g_true": 205.5,
+        "weight_true_error": 0.12,
+        "surface": "smooth"
+      },
+      "appraisal": {
+        "condition": "A",
+        "condition_factor": 1.0,
+        "base_buyback_yen": 80,
+        "buyback_yen": 80,
+        "expected_decision": "shelf",
+        "borderline": false
+      },
+      "cover": {
+        "label_ascii": "GINGA TETSUDO NO YORU"
+      }
+    },
+    {
+      "id": "book-04",
+      "isbn13": "9784167158026",
+      "ean13": "9784167158026",
+      "bib": {
+        "title": "こころ・坊っちゃん",
+        "volume": null,
+        "series": "文春文庫",
+        "creators": [
+          "夏目, 漱石, 1867-1916"
+        ],
+        "responsibility": [
+          "夏目漱石 著"
+        ],
+        "publisher": "文芸春秋",
+        "date": "1996.3",
+        "year": 1996,
+        "extent": "478p ; 16cm",
+        "isbn_as_recorded": "4-16-715802-7",
+        "ndl_bib_id": "000002485946",
+        "ndl_url": "https://ndlsearch.ndl.go.jp/books/R100000002-I000002485946",
+        "fetched_at": "2026-10-11T11:26:16+00:00",
+        "raw_file": "outputs/ndl_raw/9784167158026.xml",
+        "raw_sha256": "2a6ab0cdf08f2ff576b623569346e9a6154a2b8a24a1b744db929a0843966185"
+      },
+      "physical": {
+        "pages": 478,
+        "height_cm_ndl": 16,
+        "format": "bunko",
+        "format_ja": "文庫（やや大きめ）",
+        "binding": "soft",
+        "dims_mm": {
+          "h": 152,
+          "w": 106,
+          "t": 18.5
+        },
+        "weight_g_estimated": 224.7,
+        "weight_g_true": 211.2,
+        "weight_true_error": -0.06,
+        "surface": "smooth"
+      },
+      "appraisal": {
+        "condition": "C",
+        "condition_factor": 0.5,
+        "base_buyback_yen": 20,
+        "buyback_yen": 10,
+        "expected_decision": "discard",
+        "borderline": false
+      },
+      "cover": {
+        "label_ascii": "KOKORO / BOTCHAN"
+      }
+    },
+    {
+      "id": "book-05",
+      "isbn13": "9784121600424",
+      "ean13": "9784121600424",
+      "bib": {
+        "title": "学問のすすめ : ほか",
+        "volume": null,
+        "series": "中公クラシックス",
+        "creators": [
+          "福沢, 諭吉, 1835-1901"
+        ],
+        "responsibility": [
+          "福沢諭吉 著"
+        ],
+        "publisher": "中央公論新社",
+        "date": "2002.11",
+        "year": 2002,
+        "extent": "265p ; 18cm",
+        "isbn_as_recorded": "4-12-160042-8",
+        "ndl_bib_id": "000004008746",
+        "ndl_url": "https://ndlsearch.ndl.go.jp/books/R100000002-I000004008746",
+        "fetched_at": "2026-10-11T11:26:20+00:00",
+        "raw_file": "outputs/ndl_raw/9784121600424.xml",
+        "raw_sha256": "f15352c765e24ced4d3a8878902810bb6b01ed8e9cb56f02c036e827c224284c"
+      },
+      "physical": {
+        "pages": 265,
+        "height_cm_ndl": 18,
+        "format": "shinsho",
+        "format_ja": "新書判",
+        "binding": "soft",
+        "dims_mm": {
+          "h": 173,
+          "w": 105,
+          "t": 10.6
+        },
+        "weight_g_estimated": 145.0,
+        "weight_g_true": 159.5,
+        "weight_true_error": 0.1,
+        "surface": "smooth"
+      },
+      "appraisal": {
+        "condition": "B",
+        "condition_factor": 0.8,
+        "base_buyback_yen": 120,
+        "buyback_yen": 96,
+        "expected_decision": "shelf",
+        "borderline": false
+      },
+      "cover": {
+        "label_ascii": "GAKUMON NO SUSUME"
+      }
+    },
+    {
+      "id": "book-06",
+      "isbn13": "9784837925125",
+      "ean13": "9784837925125",
+      "bib": {
+        "title": "武士道",
+        "volume": null,
+        "series": null,
+        "creators": [
+          "新渡戸, 稲造, 1862-1933",
+          "奈良本, 辰也, 1913-2001"
+        ],
+        "responsibility": [
+          "新渡戸稲造 著",
+          "奈良本辰也 訳・解説"
+        ],
+        "publisher": "三笠書房",
+        "date": "2013.9",
+        "year": 2013,
+        "extent": "238p ; 18cm",
+        "isbn_as_recorded": "978-4-8379-2512-5",
+        "ndl_bib_id": "024722015",
+        "ndl_url": "https://ndlsearch.ndl.go.jp/books/R100000002-I024722015",
+        "fetched_at": "2026-10-11T11:27:04+00:00",
+        "raw_file": "outputs/ndl_raw/9784837925125.xml",
+        "raw_sha256": "cdedf9ba7a8f3423f599da209fa1a4ddc845cde37a2a9a81375cec92be0525b9"
+      },
+      "physical": {
+        "pages": 238,
+        "height_cm_ndl": 18,
+        "format": "shinsho",
+        "format_ja": "新書判",
+        "binding": "soft",
+        "dims_mm": {
+          "h": 173,
+          "w": 105,
+          "t": 9.5
+        },
+        "weight_g_estimated": 130.7,
+        "weight_g_true": 113.7,
+        "weight_true_error": -0.13,
+        "surface": "smooth"
+      },
+      "appraisal": {
+        "condition": "B",
+        "condition_factor": 0.8,
+        "base_buyback_yen": 60,
+        "buyback_yen": 48,
+        "expected_decision": "discard",
+        "borderline": true
+      },
+      "cover": {
+        "label_ascii": "BUSHIDO"
+      }
+    },
+    {
+      "id": "book-07",
+      "isbn13": "9784000912556",
+      "ean13": "9784000912556",
+      "bib": {
+        "title": "芥川竜之介小説集. 1",
+        "volume": "1",
+        "series": null,
+        "creators": [
+          "芥川, 竜之介, 1892-1927"
+        ],
+        "responsibility": [
+          "中村真一郎 編"
+        ],
+        "publisher": "岩波書店",
+        "date": "1987.7",
+        "year": 1987,
+        "extent": "270p ; 19cm",
+        "isbn_as_recorded": "4-00-091255-0",
+        "ndl_bib_id": "000001913925",
+        "ndl_url": "https://ndlsearch.ndl.go.jp/books/R100000002-I000001913925",
+        "fetched_at": "2026-10-11T11:27:06+00:00",
+        "raw_file": "outputs/ndl_raw/9784000912556.xml",
+        "raw_sha256": "d1d2991f691a710962e1db580302f0ffcc0d078fc21353924f43efd23206feda"
+      },
+      "physical": {
+        "pages": 270,
+        "height_cm_ndl": 19,
+        "format": "shiroku",
+        "format_ja": "四六判（並製）",
+        "binding": "soft",
+        "dims_mm": {
+          "h": 188,
+          "w": 127,
+          "t": 12.8
+        },
+        "weight_g_estimated": 229.5,
+        "weight_g_true": 247.9,
+        "weight_true_error": 0.08,
+        "surface": "rough"
+      },
+      "appraisal": {
+        "condition": "C",
+        "condition_factor": 0.5,
+        "base_buyback_yen": 150,
+        "buyback_yen": 75,
+        "expected_decision": "shelf",
+        "borderline": false
+      },
+      "cover": {
+        "label_ascii": "AKUTAGAWA SHOSETSU-SHU 1"
+      }
+    },
+    {
+      "id": "book-08",
+      "isbn13": "9784000928298",
+      "ean13": "9784000928298",
+      "bib": {
+        "title": "定本漱石全集. 第9巻",
+        "volume": "第9巻",
+        "series": null,
+        "creators": [
+          "夏目, 漱石, 1867-1916"
+        ],
+        "responsibility": [
+          "夏目金之助 著"
+        ],
+        "publisher": "岩波書店",
+        "date": "2017.8",
+        "year": 2017,
+        "extent": "416p ; 20cm + 8p",
+        "isbn_as_recorded": "978-4-00-092829-8",
+        "ndl_bib_id": "028381897",
+        "ndl_url": "https://ndlsearch.ndl.go.jp/books/R100000002-I028381897",
+        "fetched_at": "2026-10-11T11:27:08+00:00",
+        "raw_file": "outputs/ndl_raw/9784000928298.xml",
+        "raw_sha256": "dccacffb81f503323c84737ffb1d6223d3ad390e77230cfc42bd2c8005f715ac"
+      },
+      "physical": {
+        "pages": 416,
+        "height_cm_ndl": 20,
+        "format": "shiroku_hard",
+        "format_ja": "四六判（上製）",
+        "binding": "hard",
+        "dims_mm": {
+          "h": 194,
+          "w": 133,
+          "t": 23.7
+        },
+        "weight_g_estimated": 424.2,
+        "weight_g_true": 377.5,
+        "weight_true_error": -0.11,
+        "surface": "rough"
+      },
+      "appraisal": {
+        "condition": "A",
+        "condition_factor": 1.0,
+        "base_buyback_yen": 600,
+        "buyback_yen": 600,
+        "expected_decision": "shelf",
+        "borderline": false
+      },
+      "cover": {
+        "label_ascii": "TEIHON SOSEKI ZENSHU 9"
+      }
+    },
+    {
+      "id": "book-09",
+      "isbn13": "9784480710604",
+      "ean13": "9784480710604",
+      "bib": {
+        "title": "太宰治全集. 10 (小説 9)",
+        "volume": "10 (小説 9)",
+        "series": null,
+        "creators": [
+          "太宰, 治, 1909-1948"
+        ],
+        "responsibility": [
+          "太宰治 著"
+        ],
+        "publisher": "筑摩書房",
+        "date": "1999.1",
+        "year": 1999,
+        "extent": "638p ; 21cm",
+        "isbn_as_recorded": "4-480-71060-4",
+        "ndl_bib_id": "000002773587",
+        "ndl_url": "https://ndlsearch.ndl.go.jp/books/R100000002-I000002773587",
+        "fetched_at": "2026-10-11T11:27:29+00:00",
+        "raw_file": "outputs/ndl_raw/9784480710604.xml",
+        "raw_sha256": "f4fd3fc66dde51dc820ed2e70cd0b82958111875303f0b11a36d845d7b769372"
+      },
+      "physical": {
+        "pages": 638,
+        "height_cm_ndl": 21,
+        "format": "a5",
+        "format_ja": "A5判（上製）",
+        "binding": "hard",
+        "dims_mm": {
+          "h": 210,
+          "w": 148,
+          "t": 33.7
+        },
+        "weight_g_estimated": 743.8,
+        "weight_g_true": 847.9,
+        "weight_true_error": 0.14,
+        "surface": "rough"
+      },
+      "appraisal": {
+        "condition": "D",
+        "condition_factor": 0.0,
+        "base_buyback_yen": 250,
+        "buyback_yen": 0,
+        "expected_decision": "discard",
+        "borderline": false
+      },
+      "cover": {
+        "label_ascii": "DAZAI ZENSHU 10"
+      }
+    },
+    {
+      "id": "book-10",
+      "isbn13": "9784807499052",
+      "ean13": "9784807499052",
+      "bib": {
+        "title": "ザ・太宰治 : 全小説全一冊",
+        "volume": null,
+        "series": null,
+        "creators": [
+          "太宰, 治, 1909-1948"
+        ],
+        "responsibility": [
+          "太宰治 著"
+        ],
+        "publisher": "第三書館",
+        "date": "1999.2",
+        "year": 1999,
+        "extent": "982p ; 26cm",
+        "isbn_as_recorded": "4-8074-9905-X",
+        "ndl_bib_id": "000002895776",
+        "ndl_url": "https://ndlsearch.ndl.go.jp/books/R100000002-I000002895776",
+        "fetched_at": "2026-10-11T11:27:45+00:00",
+        "raw_file": "outputs/ndl_raw/9784807499052.xml",
+        "raw_sha256": "428d7bd23392d7dd4ad91683b7b46043e7dd2d76dbf74a825833684bc4060d6b"
+      },
+      "physical": {
+        "pages": 982,
+        "height_cm_ndl": 26,
+        "format": "b5",
+        "format_ja": "B5判（並製）",
+        "binding": "soft",
+        "dims_mm": {
+          "h": 257,
+          "w": 182,
+          "t": 44.8
+        },
+        "weight_g_estimated": 1573.6,
+        "weight_g_true": 1494.9,
+        "weight_true_error": -0.05,
+        "surface": "smooth"
+      },
+      "appraisal": {
+        "condition": "B",
+        "condition_factor": 0.8,
+        "base_buyback_yen": 300,
+        "buyback_yen": 240,
+        "expected_decision": "shelf",
+        "borderline": false
+      },
+      "cover": {
+        "label_ascii": "THE DAZAI OSAMU"
+      }
+    }
+  ]
+}
