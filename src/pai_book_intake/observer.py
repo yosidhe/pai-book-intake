@@ -19,6 +19,8 @@ from .bus import Bus, Message
 from .runlog import OUTCOMES
 
 TASK = "observer"
+# 査定台のメッセージ → 報告書に出す状態
+TRAY_STATE = {"tray.held": "held", "release": "released", "release.revoked": "waiting"}
 
 
 @dataclass(frozen=True)
@@ -45,6 +47,8 @@ class BoxState:
     feedback: Counter = field(default_factory=Counter)
     stopped: bool = False
     stop_reason: str | None = None
+    on_tray: dict = field(default_factory=dict)  # 査定台に残っている本: book_id → 状態・理由（運搬許可の待ち・保留）
+    pick_denied: int = 0  # 許可の無い本を B が持っていこうとして断られた回数
 
 
 class Observer:
@@ -78,6 +82,13 @@ class Observer:
                     self._stop(env, "barcode_unreadable", {"consecutive": st.consecutive_unreadable})
         elif msg.topic == "book.result":
             self._on_book_result(env, st, msg.payload)
+        elif msg.topic in ("tray.placed", "tray.scanned", "tray.held", "tray.remaining", "release", "release.revoked"):
+            p = msg.payload
+            st.on_tray[p["book_id"]] = {"state": TRAY_STATE.get(msg.topic, p.get("state")), "reason": p.get("reason") or ""}
+        elif msg.topic == "tray.picked":
+            st.on_tray.pop(msg.payload["book_id"], None)
+        elif msg.topic == "pick.denied":
+            st.pick_denied += 1
 
     def _on_book_result(self, env: int, st: BoxState, p: dict) -> None:
         outcome = p["outcome"]
@@ -119,6 +130,7 @@ class Observer:
             f"- 停止: {'あり — ' + str(st.stop_reason) if st.stopped else 'なし'}",
             f"- バーコード: 読み取り {st.barcode_reads} 回、うち読めず {st.barcode_unreadable} 回",
             f"- 査定額の合計（架空の仮値。棚に置いた本のみ）: {value:,} 円",
+            f"- 査定台に残った本: {len(st.on_tray)} 冊、許可の無い本を持っていこうとして断られた回数: {st.pick_denied}",
             "",
             "## 本棚",
             "",
@@ -131,6 +143,12 @@ class Observer:
             "## 不合格・異常",
             "",
             *self._book_table([b for b in st.books if b["outcome"] != "succeeded"], with_reason=True),
+            "",
+            "## 査定台に残った本（運搬許可の待ち・保留）",
+            "",
+            *(["| book_id | 状態 | 理由 |", "|---|---|---|"]
+              + [f"| {k} | {v['state']} | {v['reason']} |" for k, v in sorted(st.on_tray.items())]
+              if st.on_tray else ["ありません。"]),
             "",
             "## 工程間のフィードバック",
             "",

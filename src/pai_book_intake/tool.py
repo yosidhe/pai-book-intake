@@ -110,6 +110,7 @@ class World:
     def __init__(self, scene, n_envs: int, dt: float):
         self.scene, self.n, self.dt = scene, n_envs, dt
         self.robots: list[Robot] = []
+        self.monitors: list = []  # 毎歩の後に呼ぶ関数（技能の中の歩みも含めて、全部の歩みを見張るため）
         self.steps = 0
 
     @property
@@ -119,13 +120,17 @@ class World:
     def step(self, k: int = 1, hook=None) -> None:
         for _ in range(k):
             for r in self.robots:
-                r.e.control_dofs_position(r.target)
+                # 止めている環境では、止めた時点の目標を送り続ける（技能が全環境ぶんの目標を書き換えても動かない）
+                r.e.control_dofs_position(np.where(r.frozen[:, None], r.frozen_target, r.target))
+                r.suction.on &= ~r.frozen
                 if r.suction.on.any():
                     r.suction.apply()
             if hook is not None:
                 hook()
             self.scene.step()
             self.steps += 1
+            for m in self.monitors:
+                m()
 
 
 class Robot:
@@ -140,7 +145,20 @@ class Robot:
         self.target = np.tile(self.home, (self.n, 1))
         self.suction = Suction(self)
         self.ik_err_max = np.zeros(self.n)
+        self.frozen = np.zeros(self.n, bool)  # True の環境ではこのロボットを動かさない（運搬許可の無い本に触れない等）
+        self.frozen_target = self.target.copy()
         world.robots.append(self)
+
+    def freeze(self, mask: np.ndarray) -> None:
+        """mask の環境で、いまの目標のまま止める。解くまで技能を呼んでも動かない。"""
+        mask = np.asarray(mask, bool)
+        self.frozen_target[mask] = self.target[mask]
+        self.frozen = self.frozen | mask
+
+    def unfreeze(self) -> None:
+        """止めていた環境の目標を、止めた時点の値に戻してから解く（止めている間の書き換えを持ち越さない）。"""
+        self.target[self.frozen] = self.frozen_target[self.frozen]
+        self.frozen = np.zeros(self.n, bool)
 
     def setup(self, grip_limit_n: float | None = None) -> None:
         dofs = np.arange(len(HOME))

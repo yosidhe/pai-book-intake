@@ -197,9 +197,9 @@ def render(d: dict) -> str:
     by0 = 670
     out.append(f'<rect x="640" y="{by0}" width="1020" height="370" rx="6" fill="{PANEL}" stroke="{LINE}"/>')
     out.append(t(654, by0 + 24, "動作状況（直近の実行）", 15, "bold"))
-    for i, r in enumerate(d["runs"]):
-        y = by0 + 52 + i * 26
-        out.append(glyph(662, y - 4, r["status"]) + t(676, y, r["label"], 12) + t(900, y, r["result"], 12, "bold"))
+    for i, r in enumerate(d["runs"]):  # 1 件 2 行（名前と結果）。右の残タスクの列にはみ出さないように
+        y = by0 + 52 + i * 42
+        out.append(glyph(662, y - 4, r["status"]) + t(676, y, r["label"], 12) + t(676, y + 17, r["result"], 12, "bold"))
     out.append(t(1000, by0 + 24, "残タスク（期日順）", 15, "bold"))
     out.append(t(1000, by0 + 46, "期日", 11, "bold", SUB) + t(1052, by0 + 46, "担い手", 11, "bold", SUB)
                + t(1116, by0 + 46, "内容", 11, "bold", SUB))
