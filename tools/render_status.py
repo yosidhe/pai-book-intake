@@ -77,6 +77,8 @@ def dash(status) -> str:
 
 
 def render(d: dict) -> str:
+    bh = max(370, 70 + 28 * len(d["tasks"]))  # 下の枠の高さ（残タスクの行数で伸ばす）
+    H = 670 + bh + 30
     out = [f'<svg xmlns="http://www.w3.org/2000/svg" width="{W}" height="{H}" viewBox="0 0 {W} {H}" '
            f'font-family="{FONT}" style="font-variant-numeric: tabular-nums">',
            f'<rect width="{W}" height="{H}" fill="#fff"/>',
@@ -195,7 +197,7 @@ def render(d: dict) -> str:
 
     # ---- 動作状況と残タスク（下） ----
     by0 = 670
-    out.append(f'<rect x="640" y="{by0}" width="1020" height="370" rx="6" fill="{PANEL}" stroke="{LINE}"/>')
+    out.append(f'<rect x="640" y="{by0}" width="1020" height="{bh}" rx="6" fill="{PANEL}" stroke="{LINE}"/>')
     out.append(t(654, by0 + 24, "動作状況（直近の実行）", 15, "bold"))
     for i, r in enumerate(d["runs"]):  # 1 件 2 行（名前と結果）。右の残タスクの列にはみ出さないように
         y = by0 + 52 + i * 42
