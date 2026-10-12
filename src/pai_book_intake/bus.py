@@ -16,7 +16,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
-TASKS = ("robot-a-pick", "inspect-flip", "robot-b-sort", "appraisal", "observer")
+# inspect-scan は検品トレー案（inspection.py）の工程。P1 の流れ（p1_demo）はまだ inspect-flip を使う
+TASKS = ("robot-a-pick", "inspect-flip", "inspect-scan", "robot-b-sort", "appraisal", "observer")
 BROADCAST = "*"
 RECORD_TYPES = ("feedback", "event", "sample", "note")
 
