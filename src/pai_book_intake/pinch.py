@@ -138,6 +138,7 @@ class PinchRobot(Robot):
         self.e.set_dofs_kp(self.kp, dofs)
         self.e.set_dofs_kv(self.kv, dofs)
         self.e.set_dofs_force_range(-self.force, self.force, dofs)
+        self.force_now = np.tile(self.force, (self.n, 1))  # いま効いている力の上限（ACT のデモの行動に記録する）
         self.e.set_qpos(self.target)
         self.e.control_dofs_position(self.target)
 
@@ -146,6 +147,12 @@ class PinchRobot(Robot):
         for n, v in named.items():
             f[self.idx[n]] = v
         self.e.set_dofs_force_range(-f, f, np.arange(len(f)))
+        self.force_now = np.tile(f, (self.n, 1))
+
+    def set_forces_per_env(self, f: np.ndarray) -> None:
+        """環境ごとに違う力の上限（[n, n_dofs]）。ACT の方策が出す力をそのまま効かせる。"""
+        self.e.set_dofs_force_range(-f, f, np.arange(f.shape[1]))
+        self.force_now = f.copy()
 
     def i(self, name: str) -> int:
         return self.idx[name]

@@ -90,6 +90,9 @@ def parse_args():
     ap.add_argument("--barcode-res", type=int, nargs=2, default=[1920, 1440])
     ap.add_argument("--shelf-mode", choices=SHELF_MODES, default="flat",
                     help="本棚への置き方。flat = 平らに置いて積む（B8 c・既定）、standing = 立てて差し込む（B4）")
+    ap.add_argument("--inject-camera-dirty-from", type=int, default=-1,
+                    help="わざと失敗させる: この冊目（0 から）以降、点検カメラの画像を汚す（-1 = しない）。"
+                         "読めない本が続くと、オブザーバが箱ごと止める（02_確認事項 B9）")
     return ap.parse_args()
 
 
@@ -100,7 +103,9 @@ def main() -> None:
     run_id, out, meta = new_run(TRIAL, {k: (str(v.name) if isinstance(v, Path) else v) for k, v in vars(args).items()},
                                 extra={"genesis": gs.__version__})
     bus = Bus(run_id, out / "bus.jsonl")
-    observer = Observer(bus, ObserverConfig(max_consecutive_failures=3, barcode_unreadable_limit=3, shelf_capacity=20))
+    # 読めない本は人の判断待ちとして査定台に残る。台の置き場所は 2 つなので、3 冊続けて読めないまで待つと、3 冊目を置く前に
+    # 台が埋まり、止まらずに待ち続けた（2026-10-28）。置き場所の数だけ続けて読めなければ、カメラの故障を疑って止める
+    observer = Observer(bus, ObserverConfig(max_consecutive_failures=3, barcode_unreadable_limit=2, shelf_capacity=20))
     ctx: dict = {"recording": []}
     result: dict = {}
     error = None
@@ -209,6 +214,57 @@ def build(args, out: Path, site, pile_specs):
     return scene, world, rob_a, rob_b, books, keeper_ent, keeper, cams
 
 
+def dirty_lens(rgb: np.ndarray) -> np.ndarray:
+    """わざと起こす故障: 点検カメラのレンズの汚れ（ぼかして白っぽい膜をかける）。"""
+    from PIL import ImageFilter
+
+    img = Image.fromarray(rgb).filter(ImageFilter.GaussianBlur(radius=14))
+    a = np.asarray(img).astype(np.float32)
+    return np.clip(0.45 * a + 0.55 * 200.0, 0, 255).astype(np.uint8)
+
+
+def stage_rates(per_book: list[dict], catalog) -> dict:
+    """環境 0 の工程ごとの成功率（02_確認事項 B10）。分母はその工程まで来た本。"""
+    st = {k: [0, 0] for k in ("pick", "barcode", "appraisal", "transport", "free_space", "shelve", "discard", "overall")}
+
+    def add(k, ok):
+        st[k][0] += int(bool(ok))
+        st[k][1] += 1
+
+    for r in per_book:
+        if "a" not in r:
+            continue
+        add("overall", r["delivered"][0] if "delivered" in r else False)
+        add("pick", r["a"]["on_table"][0])
+        if not r["a"]["on_table"][0] or "isbn_read" not in r:
+            continue
+        isbn = r["isbn_read"][0]
+        add("barcode", isbn is not None)
+        if isbn is None:
+            continue
+        b = catalog.by_id(r["book_id"])
+        add("appraisal", isbn == b.isbn13 and appraise(isbn, catalog).destination == appraise(b.isbn13, catalog).destination)
+        dest = (r.get("destination") or [None])[0]
+        if dest is None:
+            continue
+        add("transport", (r.get("b_pick") or {}).get("lifted", [False])[0])
+        if dest == "discard" and "bin" in r:
+            add("discard", r["bin"]["in_bin_flat"][0])
+        if dest == "shelf" and "shelf" in r:
+            plan = r["shelf"].get("plan", [None])[0]
+            add("free_space", plan is not None)
+            if plan is not None:
+                add("shelve", r["shelf"]["ok"][0])
+    return {k: {"ok": v[0], "n": v[1], "rate": (v[0] / v[1]) if v[1] else None} for k, v in st.items()}
+
+
+def carry_z(book, spec, bx) -> float:
+    """A が持ち上げる高さ（本の底）。箱の壁の 40 mm 上か、本の今の底の 50 mm 上の高い方。10 冊を積むと上の本は壁より上にあり、
+    壁の高さに固定すると「持ち上げ」で下へ動いた（2026-10-28）"""
+    z = float((book.get_pos().cpu().numpy()[:, 2] - spec.thickness_m / 2).max())
+    return max(bx["wall_h"] + 0.04, z + 0.05)
+
+
 def stack_books(books, specs, site, n, rng) -> None:
     bx = site["box"]
     z = np.full(n, bx["floor"])
@@ -265,10 +321,19 @@ def run(args, run_id: str, out: Path, bus: Bus, obs: Observer, ctx: dict) -> dic
             ctx["recording"].append(cams[name])
     t0 = time.time()
     per_book = []
+    stopped_at = None
     for k in range(args.books):
+        if all(obs.is_stopped(i) for i in range(n)):
+            # オブザーバが全部の箱を止めた。残りの本には触れない（止めた理由は報告書に出る）
+            stopped_at = k
+            bus.publish("robot-a-pick", "observer", "event", "line.stopped",
+                        {"at_book": k, "remaining": pile_ids[:len(pile) - k][::-1],
+                         "reasons": [obs.box(i).stop_reason for i in range(n)]})
+            break
         idx = len(pile) - 1 - k
+        dirty = 0 <= args.inject_camera_dirty_from <= k
         rec = process_book(k, idx, books, pile, site, shelf, keeper, keeper_ent, tb, bn, station, rbs, ra, rb, world,
-                           cams, gates, bus, obs, inv, run_id, out, catalog, args.shelf_mode)
+                           cams, gates, bus, obs, inv, run_id, out, catalog, args.shelf_mode, camera_dirty=dirty)
         per_book.append(rec)
     wall = time.time() - t0
     for name in ("overview", "shelf_view"):
@@ -298,13 +363,16 @@ def run(args, run_id: str, out: Path, bus: Bus, obs: Observer, ctx: dict) -> dic
         "inventory": shelf_rows,
         "not_implemented": NOT_IMPLEMENTED,
         "stop_reasons": [obs.box(i).stop_reason for i in range(n)],
+        "stopped_at_book": stopped_at,
+        "injected": {"camera_dirty_from": args.inject_camera_dirty_from},
+        "stage_rates_env0": stage_rates(per_book, catalog),
         "sim_time_s": world.sim_time, "wall_build_s": build_s, "wall_run_s": wall,
         "site": site.raw, "per_book": per_book,
     }
 
 
 def process_book(k, idx, books, pile, site, shelf, keeper, keeper_ent, tb, bn, station, rbs, ra, rb, world, cams, gates,
-                 bus, obs, inv, run_id, out, catalog, shelf_mode: str = "flat") -> dict:
+                 bus, obs, inv, run_id, out, catalog, shelf_mode: str = "flat", camera_dirty: bool = False) -> dict:
     n = world.n
     book, spec = books[idx], pile[idx]
     rec: dict = {"book_id": spec.book_id, "title": spec.title}
@@ -323,7 +391,7 @@ def process_book(k, idx, books, pile, site, shelf, keeper, keeper_ent, tb, bn, s
     o: dict = {}
     bus.publish("robot-a-pick", "observer", "event", "pick.start", {"book_id": spec.book_id})
     run_generators(world, [g_pick(ra, book, spec, o, lower=lower, surface_z=None if lower else bx["floor"],
-                                  carry_bottom_z=bx["wall_h"] + 0.04, plate_mode=PLATE_MODE, claw_mode=CLAW_MODE)])
+                                  carry_bottom_z=carry_z(book, spec, bx), plate_mode=PLATE_MODE, claw_mode=CLAW_MODE)])
     grip_a = o["grip"]
     slot_xy = np.array([tb["slots"][s] for s in slot])
     run_generators(world, [g_move_book(ra, grip_a, slot_xy)])
@@ -357,12 +425,17 @@ def process_book(k, idx, books, pile, site, shelf, keeper, keeper_ent, tb, bn, s
         # 画角は本が収まるだけ（ズーム）。Genesis のカメラは作った後に画角を変えられないので、作るときの 14° を使う
         rgb, *_ = cam.render()
         rgb = np.asarray(rgb)
+        if camera_dirty:
+            rgb = dirty_lens(rgb)
+            rec["injected"] = "camera_dirty"
+            rec["expected_flow"][0] = False  # わざと読めなくした本は、届かないのが正しい
         Image.fromarray(rgb).save(out / f"barcode_{spec.book_id}_env0.png")
         isbn[0] = decode_isbn(rgb)
         rec["barcode_view_m"] = view
         bus.publish("inspect-scan", "appraisal", "event", "barcode.read",
                     {"env": 0, "book_id": spec.book_id, "ok": isbn[0] is not None, "isbn": isbn[0],
-                     "correct": isbn[0] == spec.isbn13, "source": "camera"})
+                     "correct": isbn[0] == spec.isbn13, "source": "camera",
+                     **({"injected_fault": "camera_dirty"} if camera_dirty else {})})
     for i in range(1, n):
         if alive[i]:
             isbn[i] = spec.isbn13 if up_z[i] > 0 else None
@@ -376,7 +449,12 @@ def process_book(k, idx, books, pile, site, shelf, keeper, keeper_ent, tb, bn, s
             continue
         gates[i].on_scan(spec.book_id, isbn[i])
         if isbn[i] is None:
-            # 裏返し（B3）はまだ。人の判断待ちとして台に残す
+            # 点検工程は A へ裏返しを依頼する（修正依頼。inspection.py の流れ）。裏返し（B3）はまだ無いので、A は断り、
+            # 人の判断待ちとして台に残す
+            bus.publish("inspect-scan", "robot-a-pick", "feedback", "fix_request",
+                        {"env": i, "book_id": spec.book_id, "action": "flip", "attempt": 1})
+            bus.publish("robot-a-pick", "inspect-scan", "event", "fix.declined",
+                        {"env": i, "book_id": spec.book_id, "action": "flip", "reason": "flip_not_implemented"})
             bus.publish("inspect-scan", "observer", "event", "escalation",
                         {"env": i, "book_id": spec.book_id, "reason": "barcode_unreadable", "flip": "not_implemented"})
             gates[i].on_escalated(spec.book_id, "barcode_unreadable")

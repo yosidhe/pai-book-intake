@@ -6,6 +6,8 @@
 |---|---|---|---|---|
 | Genesis (genesis-world 1.4.3) | 物理シミュレーション・描画 | Apache-2.0 | https://github.com/Genesis-Embodied-AI/Genesis | pip で導入。リポジトリには同梱しない |
 | Franka Emika Panda モデル（Genesis 同梱 `xml/franka_emika_panda/`） | ロボットアーム | Apache-2.0（同フォルダの README による） | Genesis パッケージ内 | 実行時に読み込む。メッシュはコピーしない。手首の先は自作のグリッパに置き換える |
+| LeRobot 0.4.4（ACT のモデルだけ） | ロボット A の取り出しの模倣学習（ACT） | Apache-2.0 | https://github.com/huggingface/lerobot | 2026-10-28 に追加。pip で `--no-deps` で導入し、import に要る依存だけを `docker/requirements-act.txt` に固定（einops MIT・draccus MIT・huggingface-hub / safetensors / datasets / accelerate / diffusers Apache-2.0・deepdiff MIT・termcolor MIT・jsonlines BSD-3-Clause・pyserial BSD-3-Clause・packaging Apache-2.0/BSD）。学習済みの重み・データセットは使わず、デモはこのシーンで自分で集めた |
+| torchvision 0.23.0 | ACT の依存（画像の部品は使わない） | BSD-3-Clause | https://github.com/pytorch/vision | 2026-10-28 に追加 |
 | zxing-cpp 3.1.1 | バーコードの生成・読み取り | Apache-2.0 | https://github.com/zxing-cpp/zxing-cpp | pip で導入 |
 | PyTorch 2.8.0 | 計算基盤 | BSD-3-Clause | https://pytorch.org | pip で導入 |
 | Poly Haven のアセット（予定） | 箱・棚・回収箱の見た目 | CC0 | https://polyhaven.com/license | 採用したアセット名をここに追記する |

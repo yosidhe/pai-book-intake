@@ -1,0 +1,14 @@
+# ACT（LeRobot）のモデルだけを使う。LeRobot の全依存（wandb・rerun・cmake など）は要らないので --no-deps で入れ、
+# ACTPolicy の import に要るものだけを固定する（2026-10-28 に使い捨てのコンテナで import と学習 1 歩を確かめた組み合わせ）
+einops==0.8.2
+draccus==0.10.0
+huggingface-hub>=0.34.2,<0.36
+packaging==25.0
+deepdiff==8.6.2
+termcolor==3.3.0
+safetensors==0.8.0
+datasets==4.8.5
+jsonlines==4.0.0
+accelerate==1.15.0
+diffusers==0.35.2
+pyserial==3.5

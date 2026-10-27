@@ -17,4 +17,9 @@ RUN pip install --no-cache-dir torch==2.8.0 --index-url https://download.pytorch
 COPY docker/requirements.txt /tmp/requirements.txt
 RUN pip install --no-cache-dir -r /tmp/requirements.txt
 
+# 学習: LeRobot の ACT（Apache-2.0）。依存は requirements-act.txt に固定（理由もそこに書いた）
+RUN pip install --no-cache-dir torchvision==0.23.0 --index-url https://download.pytorch.org/whl/cu126
+COPY docker/requirements-act.txt /tmp/requirements-act.txt
+RUN pip install --no-cache-dir --no-deps lerobot==0.4.4 && pip install --no-cache-dir -r /tmp/requirements-act.txt
+
 WORKDIR /workspace
