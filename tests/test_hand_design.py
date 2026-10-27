@@ -173,3 +173,109 @@ def test_lowest_point_and_probe():
     assert v[:, 1].max() > y
     assert d.lip_probe_local(-1)[1] == pytest.approx(-y)
     assert V1.lip_lowest_z == pytest.approx(V1.fingertip_z)
+
+
+# ---------- 試行8: 背の側で挟む手（PinchHand） ----------
+
+from pai_book_intake.hand_design import PinchHand  # noqa: E402
+
+
+def _pinch_verts(d: PinchHand, tag: str) -> np.ndarray:
+    for m in ET.fromstring("<asset>" + H.pinch_asset_xml(d) + "</asset>"):
+        if m.get("name") == f"claw_{tag}_{d.name}":
+            return np.array(_floats(m.get("vertex"))).reshape(-1, 3)
+    raise KeyError(tag)
+
+
+def test_pinch_joint_order_and_ranges():
+    d = PinchHand()
+    root = _body(H.pinch_gripper_xml(d))
+    joints = {j.get("name"): _floats(j.get("range")) for j in root.iter("joint")}
+    # MJCF の木の順（dof の並び）。trial8 は名前から番号を引くが、並びが変わったら気づけるように固定する
+    assert list(joints) == list(H.PINCH_DOF_NAMES)
+    assert joints["claw_joint"] == pytest.approx([0, 0.105])
+    assert joints["finger_l_joint"] == pytest.approx([0, 0.12])
+    assert joints["plate_y_joint"] == pytest.approx([-0.12, 0.12])
+    assert joints["plate_z_joint"] == pytest.approx([0, d.plate_stroke_m])
+    # 板を下ろし切ると、板の下面が指先の高さに来る
+    assert H.PLATE_BASE_Z + d.plate_t_m + d.plate_stroke_m == pytest.approx(d.fingertip_z)
+
+
+def test_pinch_claws_only_collide_with_books_and_sit_between_pads():
+    d = PinchHand()
+    root = _body(H.pinch_gripper_xml(d))
+    claws = [g for g in root.iter("geom") if (g.get("name") or "").startswith("claw_")]
+    assert len(claws) == 2
+    for g in claws:
+        assert g.get("contype") == str(H.CLAW_BIT) and g.get("conaffinity") == str(H.CLAW_BIT)
+    # 台・箱・床のビット（1）と共通のビットを持たない
+    assert H.CLAW_BIT & H.ENV_BIT == 0
+    pads = {g.get("name"): g for g in root.iter("geom") if (g.get("name") or "").startswith("pad_")}
+    assert set(pads) == {"pad_a", "pad_b"}
+    for g in pads.values():
+        assert _floats(g.get("friction"))[0] == pytest.approx(1.0)
+    wall = [g for g in root.iter("geom") if g.get("name") == "wall"][0]
+    assert _floats(wall.get("friction"))[0] == pytest.approx(1.0)  # 壁にも同じゴム（A2-3）
+    # 爪はゴムの面の内側にあり、重ならない（x）
+    for tag, sign in (("a", -1), ("b", +1)):
+        v = _pinch_verts(d, tag)
+        xs = np.abs(v[:, 0])
+        assert xs.max() == pytest.approx(d.span_m / 2 - d.pad_w_m - d.claw_gap_m)
+        assert xs.min() == pytest.approx(xs.max() - d.claw_w_m)
+        assert np.sign(v[:, 0]).tolist() == [sign] * len(v)
+        # 先端は右の指の内面の CLAW_RECESS 手前（引っ込めたとき CLAW_RECESS）、下面は指先と同じ高さ、厚みは 3 mm
+        assert v[:, 1].max() == pytest.approx(-H.CLAW_RECESS)
+        assert v[:, 2].max() == pytest.approx(d.finger_len_m)
+        assert v[:, 2].max() - v[:, 2].min() == pytest.approx(d.claw_t_m)
+        # 出し切っても根元は内面の後ろに残る
+        assert v[:, 1].min() + d.claw_stroke_m < 0
+
+
+def test_pinch_claw_strength_matches_cantilever_and_limits():
+    d = PinchHand()
+    p = H.DESIGN_BOOK_KG * H.G * H.DYNAMIC_FACTOR / 2
+    inertia = d.claw_w_m * d.claw_t_m ** 3 / 12
+    defl, stress = d.claw_strength()
+    assert defl == pytest.approx(p * 0.105 ** 3 / (3 * H.E_STEEL_PA * inertia))
+    assert defl < H.MAX_TIP_DEFLECTION_M  # 3 mm 厚・105 mm で 0.93 mm（02_確認事項 A2-2 の表）
+    assert defl * 1000 == pytest.approx(0.93, abs=0.01)
+    # 2 mm 厚では 100 mm 出すと 2.7 mm たわむので不可
+    with pytest.raises(ValueError, match="たわみ"):
+        PinchHand(name="thin", claw_t_m=0.002, claw_stroke_m=0.10)
+    # 3 mm 厚でも 110 mm は 1.07 mm で不可
+    with pytest.raises(ValueError, match="たわみ"):
+        PinchHand(name="long", claw_stroke_m=0.11)
+
+
+@pytest.mark.parametrize("kw, msg", [
+    ({"rubber_mu": 0.1}, "rubber_mu"),
+    ({"span_m": 0.20}, "span_m"),
+    ({"claw_w_m": 0.03}, "重なる"),
+    ({"claw_t_m": 0.001}, "claw_t_m"),
+    ({"finger_open_m": 0.05}, "finger_open_m"),
+])
+def test_pinch_validation(kw, msg):
+    with pytest.raises(ValueError, match=msg):
+        PinchHand(name="bad", **kw)
+
+
+def test_pinch_probe_is_inside_claw_and_fit():
+    d = PinchHand()
+    x, y, z = d.claw_probe_local(+1)
+    v = _pinch_verts(d, "b")
+    assert v[:, 0].min() < x < v[:, 0].max()
+    assert v[:, 1].min() < y < v[:, 1].max()
+    # 探る点の高さが、その y での爪の上面と下面の間
+    assert d.finger_len_m - d.claw_t_m < z < d.finger_len_m
+    assert d.fits(0.182, 0.012, 0.012)  # B5 と両側 12 mm で 206 ≤ 240
+    assert not d.fits(0.182, 0.04, 0.04)
+
+
+def test_pinch_inserts_meshes_and_file_name():
+    base = '<mujoco><asset><mesh name="m" file="a.stl"/></asset><worldbody><body name="b">' \
+           '<site name="attachment_site"/></body></worldbody></mujoco>'
+    d = PinchHand(name="P1")
+    root = ET.fromstring(H.insert_into_robot_xml(base, d))
+    assert [m.get("name") for m in root.find("asset")] == ["claw_a_P1", "claw_b_P1", "m"]
+    assert root.find(".//body[@name='plate']") is not None
+    assert H.xml_file_name(d) == "panda_book_gripper_P1.xml"

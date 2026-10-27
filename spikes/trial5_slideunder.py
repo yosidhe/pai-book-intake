@@ -137,6 +137,12 @@ def parse_args():
     ap.add_argument("--jitter-cm", type=float, default=1.0, help="本の位置のばらつき（±）")
     ap.add_argument("--jitter-deg", type=float, default=5.0, help="本の向きのばらつき（±）")
     ap.add_argument("--render", default="", help="動画と連続写真を撮るセル（カンマ区切り。例 R25:off）")
+    # 試行8 と比べるための条件（2026-10-18 追加。省略時は試行5 のまま）
+    ap.add_argument("--cone", choices=["pyramidal", "elliptic"], default="pyramidal",
+                    help="摩擦円錐。pyramidal（試行5）は摩擦が設定の約半分しか効かない（friction_calib.py）")
+    ap.add_argument("--edge-gap-cm", type=float, default=TABLE_EDGE_GAP * 100,
+                    help="平置き: 本の爪の側の縁から台の縁まで（試行5 は 1 cm。台の縁を使わない比較は大きくする）")
+    ap.add_argument("--table-friction", type=float, default=None, help="台・箱・トレーの摩擦（省略時は Genesis の既定）")
     return ap.parse_args()
 
 
@@ -166,9 +172,14 @@ class Cell:
         return self.books[-1]
 
 
+EDGE_GAP = [TABLE_EDGE_GAP]  # run() で --edge-gap-cm に置き換える
+BOX_FRICTION = [None]  # run() で --table-friction に置き換える
+
+
 def add_box(scene, size, pos, color):
+    mat = gs.materials.Rigid(friction=BOX_FRICTION[0]) if BOX_FRICTION[0] is not None else None
     return scene.add_entity(gs.morphs.Box(size=tuple(float(v) for v in size), pos=tuple(float(v) for v in pos),
-                                          fixed=True), surface=gs.surfaces.Default(color=color))
+                                          fixed=True), material=mat, surface=gs.surfaces.Default(color=color))
 
 
 def build_cell(scene, cell: Cell, spec, situation: str, out: Path, render: bool) -> None:
@@ -186,7 +197,7 @@ def build_cell(scene, cell: Cell, spec, situation: str, out: Path, render: bool)
             cell.walls.append(add_box(scene, size, c + [off[0], off[1], BOX_WALL_H / 2], CARD))
         n_books = 3
     else:
-        cell.table_edge_x = px + spec.width_m / 2 + TABLE_EDGE_GAP
+        cell.table_edge_x = px + spec.width_m / 2 + EDGE_GAP[0]
         tl = TABLE_LEN
         cell.supports.append(add_box(scene, (tl, BOX_IN[1], TABLE_TOP), cell.at(cell.table_edge_x - tl / 2, py, TABLE_TOP / 2),
                                      GRAY))
@@ -793,9 +804,12 @@ def run(args, out: Path, ctx: dict) -> dict:
     modes = {"on": [True], "off": [False], "both": [True, False]}[args.suction]
     render = set(s for s in args.render.split(",") if s)
     rng = np.random.default_rng(args.seed)
+    EDGE_GAP[0] = args.edge_gap_cm / 100
+    BOX_FRICTION[0] = args.table_friction
     gs.init(backend=gs.gpu, seed=args.seed, logging_level="warning")
     scene = gs.Scene(sim_options=gs.options.SimOptions(dt=DT, substeps=4),
-                     rigid_options=gs.options.RigidOptions(enable_self_collision=False),
+                     rigid_options=gs.options.RigidOptions(enable_self_collision=False,
+                                                           friction_cone=getattr(gs.friction_cone, args.cone)),
                      vis_options=gs.options.VisOptions(rendered_envs_idx=[0], show_world_frame=False),
                      show_viewer=False)
     scene.add_entity(gs.morphs.Plane())
@@ -960,6 +974,7 @@ def run(args, out: Path, ctx: dict) -> dict:
                  "weight_g": round(spec.weight_kg * 1000, 1), "weight_est_g": round(spec.weight_estimated_kg * 1000, 1),
                  "surface": spec.surface},
         "situation": args.situation,
+        "physics": {"friction_cone": args.cone, "edge_gap_m": EDGE_GAP[0], "table_friction": BOX_FRICTION[0]},
         "plausibility_rules": Rules().describe(),
         "designs": {c.design.name: c.design.params() for c in cells},
         "cells": cell_res,
