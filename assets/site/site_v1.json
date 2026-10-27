@@ -1,0 +1,24 @@
+{
+  "schema": "pai-book-intake/site@1",
+  "site_id": "site-v1",
+  "note": "買取ラインの配置（世界座標 m・rad。床 z=0）。本棚はラインから離れた場所にあり、位置はこのデータとして保管する（2026-10-20 ユーザー指示）。ロボット B は台車で本棚の前まで移動する",
+  "robot_a": {"base": [0.0, 0.0], "yaw": 0.0},
+  "box": {"center": [0.55, -0.02], "inner": [0.46, 0.34], "floor": 0.02, "wall_h": 0.16, "wall_t": 0.01},
+  "appraisal_table": {"center": [0.39, 0.50], "size": [0.60, 0.36], "top": 0.10,
+                      "slots": [[0.25, 0.50], [0.53, 0.50]],
+                      "camera_height": 0.90,
+                      "slots_note": "仕切りは無い。置き場所はソフトで決める（B6: 背の側 25 mm・小口の側 20 mm・天地 10 mm の間隔）"},
+  "robot_b": {"station": [0.50, 1.12, -1.5707963], "mobile": true,
+              "station_approach": [0.50, 1.75],
+              "station_approach_note": "本棚から戻るときに通る点。本棚から待機位置へまっすぐ戻ると、経路によっては腕の台座が廃棄箱に当たって 0.45 m 手前で止まった（20261023T021345）",
+              "max_speed": 0.5, "max_yaw_rate": 1.0},
+  "bin": {"center": [-0.05, 1.12], "inner": [0.40, 0.34], "floor": 0.03, "wall_h": 0.20, "wall_t": 0.01},
+  "shelves": [
+    {"shelf_id": "shelf-01", "model": "pata_book_keeper_v2_wide",
+     "origin": [-2.20, 3.40], "yaw": 0.0, "stand_h": 0.30,
+     "width": 0.400, "depth": 0.190, "n_fingers": 64, "pitch": 0.006,
+     "front_standoff": 0.50,
+     "camera": {"mount": "robot_b_base", "height_above_floor": 0.045, "forward": 0.20},
+     "note": "origin は棚の左手前の角（棚の座標: x=幅 左→右, y=奥行 手前0→奥, z=上）。yaw は棚の x 軸の向き。本は背表紙を手前・天を上にして立て、小口から差し込む（B4）"}
+  ]
+}
