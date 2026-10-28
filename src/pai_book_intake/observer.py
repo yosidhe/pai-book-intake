@@ -2,7 +2,8 @@
 
 止める条件（しきい値は ObserverConfig）
   - 本の処理の失敗（rejected / failed）が max_consecutive_failures 回続いた
-  - 本棚が満杯になった（棚に置いた冊数 ≥ shelf_capacity）
+  - 本棚が満杯になった（棚に置いた冊数 ≥ shelf_capacity）。または、運搬許可が本棚に空きがないとして本を台に残した
+    （tray.held の reason = shelf_full）
   - バーコードが barcode_unreadable_limit 回続けて読めなかった（カメラや照明の故障を疑う）
 止めるときは stop（type=event, 宛先 "*"）を 1 回だけ出す。
 
@@ -85,6 +86,9 @@ class Observer:
         elif msg.topic in ("tray.placed", "tray.scanned", "tray.held", "tray.remaining", "release", "release.revoked"):
             p = msg.payload
             st.on_tray[p["book_id"]] = {"state": TRAY_STATE.get(msg.topic, p.get("state")), "reason": p.get("reason") or ""}
+            if msg.topic == "tray.held" and p.get("reason") == "shelf_full":
+                # 本棚に空きがない。人が本棚を空けるか別の棚を割り当てるまで、この箱は進めない
+                self._stop(env, "shelf_full", {"book_id": p["book_id"], "held_on_tray": True})
         elif msg.topic == "tray.picked":
             st.on_tray.pop(msg.payload["book_id"], None)
         elif msg.topic == "pick.denied":

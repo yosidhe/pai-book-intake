@@ -83,19 +83,27 @@ class ReleaseGate:
 
     # ---- 台に置く・読む・裏返す・査定する ----
 
-    def place(self, book_id: str) -> TrayItem:
+    def place(self, book_id: str, slot: int | None = None) -> TrayItem:
+        """台に置いた本を記録する。slot は A が実際に置いた場所（省略すると空いている最初の場所）。
+        A は取りに行く前に場所を選ぶので、並行のときはその間に別の場所が空くことがある。選び直さずに記録する"""
         if book_id in self.items and self.items[book_id].state not in (DELIVERED,):
             raise ValueError(f"{book_id} はもう台の上にある")
-        slot = self.free_slot()
         if slot is None:
-            raise RuntimeError("査定台が満杯（空いたスロットが無い）")
+            slot = self.free_slot()
+            if slot is None:
+                raise RuntimeError("査定台が満杯（空いたスロットが無い）")
+        elif slot in self._used_slots():
+            raise RuntimeError(f"スロット {slot} はふさがっている")
         self._seq += 1
         it = self.items[book_id] = TrayItem(book_id, slot, self._seq)
         self._event("tray.placed", it)
         return it
 
+    def _used_slots(self) -> set[int]:
+        return {it.slot for it in self.items.values() if it.state not in (PICKED, DELIVERED)}
+
     def free_slot(self) -> int | None:
-        used = {it.slot for it in self.items.values() if it.state not in (PICKED, DELIVERED)}
+        used = self._used_slots()
         return next((s for s in range(self.n_slots) if s not in used), None)
 
     def on_scan(self, book_id: str, isbn: str | None) -> None:

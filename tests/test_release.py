@@ -213,3 +213,18 @@ def test_observer_reports_books_left_on_tray(tmp_path):
     md = obs.report_markdown(0)
     assert "査定台に残った本: 1 冊、許可の無い本を持っていこうとして断られた回数: 1" in md
     assert "| book-05 | scanned |" in md and "book-03 |" not in md.split("査定台に残った本（")[1]
+
+
+def test_place_at_the_slot_a_chose(tmp_path):
+    """A は取りに行く前に置き場所を選ぶ。並行のときは、A が運んでいる間に B が別の本を持っていき、前のスロットが
+    空く。台帳には A が実際に置いたスロットを記録する（p2_line 20261028T160151-8c1914 で book-04 を book-10 の上に
+    重ねた）"""
+    _, g = make(tmp_path, n_slots=2)
+    ready(g, "book-03")
+    chosen = g.free_slot()  # A が book-10 を取りに行く前に選んだ場所
+    assert chosen == 1
+    g.take("book-03", g.items["book-03"].clearance_id)  # その間に B が book-03 を持っていく
+    assert g.place("book-10", slot=chosen).slot == 1
+    assert g.free_slot() == 0  # 次の本は、book-10 の上ではなく空いた方へ
+    with pytest.raises(RuntimeError, match="ふさがって"):
+        g.place("book-04", slot=1)

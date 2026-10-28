@@ -16,12 +16,16 @@
   本棚                パタパタ・ブックキーパー v2 を横に長くしたもの（keeper.py）
   オブザーバ          全メッセージを見て、止める・箱ごとの報告書を書く
 
-1 冊ずつ順に処理する（A と B の並行はまだ。査定台の 2 スロットは使い回す）。
+A と B は並行して動く（既定。2026-10-28 ユーザーの要件）
+  - A は、置いた本の査定まで済んだら（査定できるという知らせ）、すぐ次の本を取りに行く。査定台の 2 スロットが
+    両方ふさがっていれば、空くまで待つ
+  - B は、査定が済んでいて運んでよい本があれば、置かれた順に運ぶ。無ければ待機位置で待つ
+  - 査定台の上に手を入れるのは一度に 1 台だけ（zone["table"]）。もう 1 台は台の手前で待つ
+  - --sequential で、前の「1 冊ずつ A → B」に戻せる（比べるため）
 
 まだ入っていないもの（結果の not_implemented に書く）
   - 裏返し（B3: 空中で回す）。バーコードが見えない本は、人の判断待ち（tray.held）として台に残す
   - 箱の中の縦置きの本（B2）。今の箱は平積みだけ
-  - A と B の並行動作
 
 描画は環境 0 だけ（WSL2 の Docker は CPU 描画）。環境 0 以外は、バーコードは本の向き（表紙が上か）から、本棚の空きは
 置いた本の位置から決める（どちらも結果に source として残す）。
@@ -54,7 +58,7 @@ from .keeper import (BASE_T, KeeperSpec, choose_flat_slot, choose_slot, choose_s
                      keeper_mjcf, occupancy_from_points, spans_from_books)
 from .observer import Observer, ObserverConfig
 from .pinch import (PinchRobot, book_frame, build_pinch_robot_xml, g_cart_chain, g_drive, g_home, g_move_book,
-                    g_move_book_joint, g_pick, g_place_flat, g_shelve, lip_side_quat, min_jerk, run_generators,
+                    g_joints, g_move_book_joint, g_pick, g_place_flat, g_shelve, lip_side_quat, min_jerk, run_generators,
                     shelve_grip_offset, standing_quat, touching)
 from .release import ReleaseGate
 from .runlog import classify, new_run, save_result
@@ -73,7 +77,12 @@ HAND = PinchHand(name="P10", rubber_mu=1.0, note="試行8 の基準（ゴム μ1
 PLATE_MODE, CLAW_MODE = "ii", "center"  # 試行8: 支えの中心が重心から最も近い（6 mm）
 DEFAULT_PILE = ("book-09", "book-04", "book-10", "book-03")  # 下から上。上から: 文庫（棚）・B5（棚）・文庫（廃棄）・
 # A5 の重い本（廃棄）
-NOT_IMPLEMENTED = ["flip (B3)", "standing books in the box (B2)", "A and B in parallel",
+# B が待機位置で待つときの腕（関節 1〜7）。HOME のままだと手先が査定台の奥の縁（台座から 0.47 m 前・高さ 0.59 m）の
+# 上にかかり、点検カメラの画像の 2 つ目の置き場所に写り込んでバーコードが読めなかった（p2_line 20261027T211526・
+# 20261027T214721 の book-05）。肩と肘をたたんで手先を 0.25 m 前（台の縁より 0.19 m 奥）・高さ 0.54 m へ引く。
+# 手のひらは下向きのまま。取りに行く前に HOME へ戻すので、ほかの動きは HOME から始まる前のまま
+B_WAIT_ARM = np.array([0.0, -1.0, 0.0, -2.6, 0.0, 1.6, -0.785])
+NOT_IMPLEMENTED = ["flip (B3)", "standing books in the box (B2)",
                    "standing books on the shelf (keeper fingers jam; 02_確認事項 B8 a/b). The default shelf mode is flat (B8 c)"]
 SHELF_MODES = ("flat", "standing")
 
@@ -93,6 +102,11 @@ def parse_args():
     ap.add_argument("--inject-camera-dirty-from", type=int, default=-1,
                     help="わざと失敗させる: この冊目（0 から）以降、点検カメラの画像を汚す（-1 = しない）。"
                          "読めない本が続くと、オブザーバが箱ごと止める（02_確認事項 B9）")
+    ap.add_argument("--shelf-capacity", type=int, default=20,
+                    help="この箱に割り当てた本棚の冊数。超える本は台に残し（shelf_full）、オブザーバが箱ごと止める。"
+                         "「本棚に空きがない」を起こすため（02_確認事項 B9）")
+    ap.add_argument("--sequential", action="store_true",
+                    help="A と B を並行させず、1 冊ずつ A → B の順に処理する（前の動き。比べるため）")
     return ap.parse_args()
 
 
@@ -309,7 +323,7 @@ def run(args, run_id: str, out: Path, bus: Bus, obs: Observer, ctx: dict) -> dic
     station = np.array(site["robot_b"]["station"])
     rbs = site["robot_b"]
     inv = Inventory(out / "inventory.sqlite")
-    gates = [ReleaseGate(bus, catalog, n_slots=len(tb["slots"]), shelf_capacity=20, env=i) for i in range(n)]
+    gates = [ReleaseGate(bus, catalog, n_slots=len(tb["slots"]), shelf_capacity=args.shelf_capacity, env=i) for i in range(n)]
     bus.publish("observer", "*", "note", "run.start",
                 {"n_envs": n, "pile_bottom_to_top": pile_ids, "face_down": sorted(face_down), "site": site.site_id,
                  "shelf": {"shelf_id": shelf.shelf_id, "origin": list(shelf.origin), "yaw": shelf.yaw},
@@ -322,19 +336,29 @@ def run(args, run_id: str, out: Path, bus: Bus, obs: Observer, ctx: dict) -> dic
     t0 = time.time()
     per_book = []
     stopped_at = None
-    for k in range(args.books):
+    common = (books, pile, site, shelf, keeper, keeper_ent, tb, bn, station, rbs, ra, rb, world, cams, gates, bus, obs, inv,
+              run_id, out, catalog, args.shelf_mode)
+
+    def line_stopped(k: int) -> bool:
         if all(obs.is_stopped(i) for i in range(n)):
             # オブザーバが全部の箱を止めた。残りの本には触れない（止めた理由は報告書に出る）
-            stopped_at = k
             bus.publish("robot-a-pick", "observer", "event", "line.stopped",
                         {"at_book": k, "remaining": pile_ids[:len(pile) - k][::-1],
                          "reasons": [obs.box(i).stop_reason for i in range(n)]})
-            break
-        idx = len(pile) - 1 - k
-        dirty = 0 <= args.inject_camera_dirty_from <= k
-        rec = process_book(k, idx, books, pile, site, shelf, keeper, keeper_ent, tb, bn, station, rbs, ra, rb, world,
-                           cams, gates, bus, obs, inv, run_id, out, catalog, args.shelf_mode, camera_dirty=dirty)
-        per_book.append(rec)
+            return True
+        return False
+
+    run_generators(world, [g_b_wait(rb)])  # B は腕をたたんで待つ
+    if args.sequential:
+        for k in range(args.books):
+            if line_stopped(k):
+                stopped_at = k
+                break
+            idx = len(pile) - 1 - k
+            dirty = 0 <= args.inject_camera_dirty_from <= k
+            per_book.append(process_book(k, idx, *common, camera_dirty=dirty))
+    else:
+        per_book, stopped_at = run_parallel(args, n, pile, common, gates, obs, bus, world, line_stopped)
     wall = time.time() - t0
     for name in ("overview", "shelf_view"):
         if name in cams:
@@ -361,7 +385,9 @@ def run(args, run_id: str, out: Path, bus: Bus, obs: Observer, ctx: dict) -> dic
         "acceptance_ok": acceptance_ok,
         "books_succeeded_per_env": n_ok, "books_expected_per_env": expected, "shelved_ok_per_env": shelved_ok,
         "inventory": shelf_rows,
-        "not_implemented": NOT_IMPLEMENTED,
+        "not_implemented": NOT_IMPLEMENTED + (["A and B in parallel (--sequential)"] if args.sequential else []),
+        "parallel": not args.sequential,
+        "cycle_s_per_book": cycle_summary(per_book, world.sim_time),
         "stop_reasons": [obs.box(i).stop_reason for i in range(n)],
         "stopped_at_book": stopped_at,
         "injected": {"camera_dirty_from": args.inject_camera_dirty_from},
@@ -371,8 +397,114 @@ def run(args, run_id: str, out: Path, bus: Bus, obs: Observer, ctx: dict) -> dic
     }
 
 
-def process_book(k, idx, books, pile, site, shelf, keeper, keeper_ent, tb, bn, station, rbs, ra, rb, world, cams, gates,
-                 bus, obs, inv, run_id, out, catalog, shelf_mode: str = "flat", camera_dirty: bool = False) -> dict:
+class _Ticker:
+    """World.step の毎歩の後に、ジェネレータを 1 歩ぶん進める（A を B の動きと同時に動かすため）。
+    run_generators と同じ約束（yield k = k 歩待つ）。ジェネレータの中で world.step を呼んではいけない"""
+
+    def __init__(self, gen):
+        self.gen, self.wait, self.alive = gen, 0, True
+
+    def __call__(self) -> None:
+        if not self.alive:
+            return
+        if self.wait > 0:
+            self.wait -= 1
+        while self.alive and self.wait == 0:
+            try:
+                self.wait = int(next(self.gen))
+            except StopIteration:
+                self.alive = False
+
+
+def run_parallel(args, n, pile, common, gates, obs, bus, world, line_stopped) -> tuple[list, int | None]:
+    """A と B を並行して動かす。A はジェネレータとして毎歩進め（_Ticker）、B はこの関数の中で順に動かす。
+    A は査定が済んだ本を queue に積む。B は queue の本を置かれた順に運び、無ければ待機位置で 1 歩ずつ待つ。"""
+    zone: dict = {"table": None}
+    queue: list[dict] = []
+    state: dict = {"stopped_at": None, "b_idle": False}
+
+    def g_a_worker():
+        for k in range(args.books):
+            if line_stopped(k):
+                state["stopped_at"] = k
+                return
+            # 査定台が両方ふさがっていれば、B が持っていくまで待つ（止まった箱は数えない）
+            # 台の本が全部「人の判断待ち」などで B が持っていけないとき（B が待機していて、渡した本も残っていない）は、
+            # 待っても空かないので待たない（g_process_a が tray_full として飛ばす。--sequential と同じ扱い）
+            waited = False
+            while any(gates[i].free_slot() is None for i in range(n) if not obs.is_stopped(i)):
+                if state.get("b_idle") and not any(gates[i].pickable() for i in range(n)):
+                    break
+                if not waited:
+                    bus.publish("robot-a-pick", "observer", "event", "line.waiting", {"reason": "tray_full", "at_book": k})
+                    waited = True
+                yield 1
+            idx = len(pile) - 1 - k
+            dirty = 0 <= args.inject_camera_dirty_from <= k
+            st: dict = {"k": k, "idx": idx}
+            yield from g_process_a(k, idx, *common, camera_dirty=dirty, st=st, zone=zone)
+            bus.publish("robot-a-pick", "robot-b-sort", "event", "appraisal.ready",
+                        {"book_id": pile[idx].book_id, "at_book": k})  # 査定が済んだ（B が運べるか見てよい）
+            queue.append(st)
+
+    ticker = _Ticker(g_a_worker())
+    world.monitors.append(ticker)
+    ticker()  # 最初の 1 歩ぶんを今進める
+    per_book: list = []
+    j = 0
+    idle = False
+    try:
+        while True:
+            if j < len(queue):
+                st = queue[j]
+                j += 1
+                if st.get("skip_b"):
+                    per_book.append(st["rec"])
+                    continue
+                while zone["table"] not in (None, "b"):  # A が台に手を入れている間は待つ
+                    world.step(1)
+                zone["table"] = "b"
+                idle = state["b_idle"] = False
+                per_book.append(process_book_b(st, st["k"], st["idx"], *common, zone=zone))
+            elif not ticker.alive:
+                break
+            else:
+                if not idle:
+                    bus.publish("robot-b-sort", "observer", "event", "b.idle", {"waiting_for": "appraised_book"})
+                    idle = state["b_idle"] = True
+                world.step(1)  # 運べる本が無い。待機位置で待つ（A はこの歩みの中で動く）
+    finally:
+        world.monitors.remove(ticker)
+    return per_book, state["stopped_at"]
+
+
+def cycle_summary(per_book: list[dict], sim_time: float) -> dict:
+    """1 冊あたりの時間（シミュの中の時間）。全体を冊数で割った値と、本ごとの A・B の時間"""
+    rows = []
+    for r in per_book:
+        t = r.get("t_sim") or {}
+        rows.append({"book_id": r.get("book_id"),
+                     "a_s": (t["appraised"] - t["a_start"]) if {"a_start", "appraised"} <= t.keys() else None,
+                     "b_s": (t["b_done"] - t["b_start"]) if {"b_start", "b_done"} <= t.keys() else None,
+                     "wait_for_b_s": (t["b_start"] - t["appraised"]) if {"b_start", "appraised"} <= t.keys() else None})
+    done = [r for r in per_book if r.get("t_sim", {}).get("b_done") is not None]
+    return {"books": len(per_book), "sim_time_s": sim_time,
+            "per_book_s": (sim_time / len(per_book)) if per_book else None,
+            "delivered_books": len(done), "rows": rows}
+
+
+def g_b_wait(rb, steps: int = 120):
+    """B の腕を待機の形（B_WAIT_ARM）にたたむ。点検カメラの視野から手を出すため"""
+    yield from g_joints(rb, rb.arm, np.tile(B_WAIT_ARM, (rb.n, 1)), steps)
+
+
+def g_process_a(k, idx, books, pile, site, shelf, keeper, keeper_ent, tb, bn, station, rbs, ra, rb, world, cams, gates,
+                bus, obs, inv, run_id, out, catalog, shelf_mode: str = "flat", camera_dirty: bool = False,
+                st: dict | None = None, zone: dict | None = None):
+    """A の工程（箱から取る → 査定台に置く → バーコードを読む → 査定）。歩みを譲るジェネレータ。
+    結果は st に入れる（rec・alive・isbn・decisions など。B の工程 process_book_b が使う）。
+    zone を渡すと、査定台の上に手を入れる間だけ zone["table"] = "a" にする（B と手がぶつからないように。並行のとき）"""
+    st = {} if st is None else st
     n = world.n
     book, spec = books[idx], pile[idx]
     rec: dict = {"book_id": spec.book_id, "title": spec.title}
@@ -385,18 +517,24 @@ def process_book(k, idx, books, pile, site, shelf, keeper, keeper_ent, tb, bn, s
         bus.publish("robot-a-pick", "observer", "event", "line.waiting", {"reason": "tray_full"})
         rec["skipped"] = "tray_full"
         rec["expected_flow"] = np.zeros(n, bool)
-        return rec
+        st.update(rec=rec, skip_b=True)
+        return
     lower = [(books[j], pile[j]) for j in range(idx)]
     bx = site["box"]
     o: dict = {}
     bus.publish("robot-a-pick", "observer", "event", "pick.start", {"book_id": spec.book_id})
-    run_generators(world, [g_pick(ra, book, spec, o, lower=lower, surface_z=None if lower else bx["floor"],
-                                  carry_bottom_z=carry_z(book, spec, bx), plate_mode=PLATE_MODE, claw_mode=CLAW_MODE)])
+    rec["t_sim"] = {"a_start": world.sim_time}
+    yield from g_pick(ra, book, spec, o, lower=lower, surface_z=None if lower else bx["floor"],
+                                  carry_bottom_z=carry_z(book, spec, bx), plate_mode=PLATE_MODE, claw_mode=CLAW_MODE)
     grip_a = o["grip"]
     slot_xy = np.array([tb["slots"][s] for s in slot])
-    run_generators(world, [g_move_book(ra, grip_a, slot_xy)])
-    run_generators(world, [g_place_flat(ra, grip_a, tb["top"], o)])
-    run_generators(world, [g_home(ra, 120)])
+    if zone is not None:  # 査定台に B の手が入っている間は、台の手前で待つ
+        while zone.get("table") not in (None, "a"):
+            yield 1
+        zone["table"] = "a"
+    yield from g_move_book(ra, grip_a, slot_xy)
+    yield from g_place_flat(ra, grip_a, tb["top"], o)
+    yield from g_home(ra, 120)
     pb, mb = book_frame(book)
     w, h, t = spec.size_m
     on_table = (np.abs(pb[:, 2] - (tb["top"] + t / 2)) < 0.006) & (np.abs(mb[:, 2, 2]) > 0.97)
@@ -408,7 +546,7 @@ def process_book(k, idx, books, pile, site, shelf, keeper, keeper_ent, tb, bn, s
         bus.publish("robot-a-pick", "inspect-scan", "event", "place.done",
                     {"env": i, "book_id": spec.book_id, "slot": int(slot[i]), "on_table": bool(on_table[i])})
         if on_table[i]:
-            gates[i].place(spec.book_id)
+            gates[i].place(spec.book_id, slot=int(slot[i]))  # 選び直さない（並行のときは、その間に別の場所が空く）
         else:
             _result(bus, "robot-a-pick", i, spec, None, "rejected", None, 0, "not_on_table")
             alive[i] = False
@@ -432,10 +570,16 @@ def process_book(k, idx, books, pile, site, shelf, keeper, keeper_ent, tb, bn, s
         Image.fromarray(rgb).save(out / f"barcode_{spec.book_id}_env0.png")
         isbn[0] = decode_isbn(rgb)
         rec["barcode_view_m"] = view
+        # 撮った時点の手先の位置（画像に手が写り込んで読めなかった。20261027T211526 の book-05）
+        rec["grippers_at_scan"] = {"a": ra.gripper.get_pos().cpu().numpy()[0], "b": rb.gripper.get_pos().cpu().numpy()[0],
+                                   "book": pb[0]}
         bus.publish("inspect-scan", "appraisal", "event", "barcode.read",
                     {"env": 0, "book_id": spec.book_id, "ok": isbn[0] is not None, "isbn": isbn[0],
                      "correct": isbn[0] == spec.isbn13, "source": "camera",
                      **({"injected_fault": "camera_dirty"} if camera_dirty else {})})
+    if zone is not None and zone.get("table") == "a":  # 置いて、読み終えた。台を B に空ける
+        zone["table"] = None
+    rec["t_sim"]["a_on_table"] = world.sim_time
     for i in range(1, n):
         if alive[i]:
             isbn[i] = spec.isbn13 if up_z[i] > 0 else None
@@ -472,7 +616,24 @@ def process_book(k, idx, books, pile, site, shelf, keeper, keeper_ent, tb, bn, s
                         {"env": i, "book_id": spec.book_id, "reason": "shelf_geometry", "height_mm": round(h * 1000)})
             gates[i].on_escalated(spec.book_id, "shelf_geometry")
             rec["expected_flow"][i] = False
+    rec["t_sim"]["appraised"] = world.sim_time
+    st.update(rec=rec, alive=alive, isbn=isbn, decisions=decisions, skip_b=False)
 
+
+def process_book_b(st, k, idx, books, pile, site, shelf, keeper, keeper_ent, tb, bn, station, rbs, ra, rb, world, cams,
+                   gates, bus, obs, inv, run_id, out, catalog, shelf_mode: str = "flat", zone: dict | None = None) -> dict:
+    """B の工程（査定が済んだ本を許可を確かめて取り、本棚か廃棄箱へ運ぶ）。g_process_a の st を受け取る。
+    zone を渡すときは、呼ぶ前に zone["table"] = "b" にしておく。台から離れたら空ける"""
+    n = world.n
+    book, spec = books[idx], pile[idx]
+    w, h, t = spec.size_m
+    rec, alive, isbn, decisions = st["rec"], st["alive"], st["isbn"], st["decisions"]
+
+    def leave_table() -> None:
+        if zone is not None and zone.get("table") == "b":
+            zone["table"] = None
+
+    rec.setdefault("t_sim", {})["b_start"] = world.sim_time
     # ---- B: 許可を確かめて取る ----
     cleared = np.zeros(n, bool)
     dest = [None] * n
@@ -486,7 +647,9 @@ def process_book(k, idx, books, pile, site, shelf, keeper, keeper_ent, tb, bn, s
     rec["cleared"] = cleared
     rec["destination"] = dest
     if not cleared.any():
+        leave_table()
         return rec
+    run_generators(world, [g_home(rb, 120)])  # 待機の形から HOME へ（取る動きは HOME から始める）
     rb.freeze(~cleared)
     o_b: dict = {}
     standing = shelf_mode == "standing" and any(dd == "shelf" for dd in dest)
@@ -506,6 +669,7 @@ def process_book(k, idx, books, pile, site, shelf, keeper, keeper_ent, tb, bn, s
         mv: dict = {}
         run_generators(world, [g_move_book_joint(rb, grip_b, np.tile(bn["center"], (n, 1)), grip_b.quat,
                                                  bn["wall_h"] + 0.05, out=mv)])
+        leave_table()  # 本を持って廃棄箱の上へ移った
         # 廃棄箱の本は積み重なる。置く面は、これまでに入れた本の上面の最も高い所（実測）
         surf = np.array([BIN_TOP.get(i, bn["floor"]) for i in range(n)])
         run_generators(world, [g_place_flat(rb, grip_b, surf, o_b)])
@@ -521,10 +685,13 @@ def process_book(k, idx, books, pile, site, shelf, keeper, keeper_ent, tb, bn, s
         rb.unfreeze()
         rb.freeze(~to_shelf)
         place = yield_shelf if shelf_mode == "standing" else yield_shelf_flat
+        leave_table()  # このあと台車で本棚へ向かう
         rec["shelf"] = place(rb, grip_b, spec, book, shelf, keeper, keeper_ent, station, rbs, world, cams, bus, inv,
                              run_id, out, to_shelf, dest, isbn, decisions, k)
         delivered |= to_shelf & rec["shelf"]["ok"]
     rb.unfreeze()
+    if not (cleared & ~delivered).any():  # 本を持ったまま戻ったとき（本棚に空きが無かったなど）は、たたまない
+        run_generators(world, [g_b_wait(rb)])  # 待機位置で腕をたたむ（点検カメラに写り込まないように）
     for i in range(n):
         if not cleared[i]:
             continue
@@ -532,8 +699,24 @@ def process_book(k, idx, books, pile, site, shelf, keeper, keeper_ent, tb, bn, s
         d = decisions[i]
         _result(bus, "robot-b-sort", i, spec, isbn[i], "succeeded" if delivered[i] else "rejected", dest[i],
                 d.value_jpy, d.reason if delivered[i] else f"not_delivered_to_{dest[i]}")
+    leave_table()
     rec["delivered"] = delivered
+    rec["t_sim"]["b_done"] = world.sim_time
     return rec
+
+
+def process_book(k, idx, books, pile, site, shelf, keeper, keeper_ent, tb, bn, station, rbs, ra, rb, world, cams, gates,
+                 bus, obs, inv, run_id, out, catalog, shelf_mode: str = "flat", camera_dirty: bool = False) -> dict:
+    """1 冊を A → B の順に処理する（--sequential のとき。並行のときは run_parallel）。"""
+    st: dict = {}
+    run_generators(world, [g_process_a(k, idx, books, pile, site, shelf, keeper, keeper_ent, tb, bn, station, rbs, ra, rb,
+                                       world, cams, gates, bus, obs, inv, run_id, out, catalog, shelf_mode,
+                                       camera_dirty=camera_dirty, st=st)])
+    if st.get("skip_b"):
+        return st["rec"]
+    return process_book_b(st, k, idx, books, pile, site, shelf, keeper, keeper_ent, tb, bn, station, rbs, ra, rb, world,
+                          cams, gates, bus, obs, inv, run_id, out, catalog, shelf_mode)
+
 
 
 def scan_shelf(rb, shelf, keeper, cams, books_on_shelf_x: list[list[tuple[float, float]]], out: Path, tag: str,

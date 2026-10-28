@@ -113,3 +113,16 @@ def test_run_status(ok, err, expected):
 def test_config_validation():
     with pytest.raises(ValueError):
         ObserverConfig(shelf_capacity=0)
+
+
+def test_book_held_for_no_shelf_space_stops_the_box(tmp_path):
+    """運搬許可が「本棚に空きがない」で本を台に残したら、箱ごと止める（人が本棚を空けるまで進めない）。
+    ほかの理由で台に残った本（読めないなど）では止めない（それは barcode_unreadable などの規則で見る）"""
+    bus, obs = setup(tmp_path, shelf_capacity=20)
+    bus.publish("appraisal", "observer", "event", "tray.held", {"env": 0, "book_id": "b1", "slot": 0,
+                                                                "reason": "barcode_not_read"})
+    assert not obs.is_stopped(0)
+    bus.publish("appraisal", "observer", "event", "tray.held", {"env": 0, "book_id": "b2", "slot": 1,
+                                                                "reason": "shelf_full"})
+    assert obs.is_stopped(0) and obs.box(0).stop_reason == "shelf_full"
+    assert stops(bus)[0].payload["book_id"] == "b2"
