@@ -52,14 +52,17 @@ def load_episodes(files: list[Path]) -> tuple[list[dict], dict]:
     n_all = 0
     for f in files:
         z = np.load(f)
+        # 配列はファイルごとに 1 回だけ読む。z[...] は読むたびに全環境ぶんを展開し、[i] の切り出しはその全体を
+        # 抱えたままになる（seed 1〜6 で学習のコンテナが 10 GB を超えた）。切り出しは copy して全体を手放す
+        state, env, action = z["state"], z["env"], z["action"]
         # 置けて、しかも本が 30 mm 以上上がったものだけ。10 冊の山の上の本では、持ち上げの高さが箱の壁で固定されていた版の
         # デモ（seed 1 の上 2 冊）が、下へ動いて置いていた（act_collect 20261027T205846-60198d。p2_line.carry_z で直した）
-        env = z["env"]
         lifted = (env[:, :, 2].max(1) - env[:, 0, 2]) > 0.03
         ok = z["success"] & lifted
         n_all += len(ok)
         for i in np.nonzero(ok)[0]:
-            eps.append({"state": z["state"][i], "env": z["env"][i], "action": z["action"][i], "book_id": str(z["book_id"])})
+            eps.append({"state": state[i].copy(), "env": env[i].copy(), "action": action[i].copy(),
+                        "book_id": str(z["book_id"])})
     return eps, {"files": len(files), "episodes_all": n_all, "episodes_used": len(eps)}
 
 

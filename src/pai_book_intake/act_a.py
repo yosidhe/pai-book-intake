@@ -226,13 +226,14 @@ class ActPolicy:
         self.meta = json.loads((Path(ckpt) / "meta.json").read_text())
         st = np.load(Path(ckpt) / "stats.npz")
         self.stats = {k: torch.tensor(st[k], device=device) for k in st.files}
+        self.p = ACTPolicy.from_pretrained(str(ckpt))
         if ensemble is not None:
-            from lerobot.policies.act.configuration_act import ACTConfig
-            cfg = ACTConfig.from_pretrained(str(ckpt))
-            cfg.temporal_ensemble_coeff, cfg.n_action_steps = ensemble, 1
-            self.p = ACTPolicy.from_pretrained(str(ckpt), config=cfg)
-        else:
-            self.p = ACTPolicy.from_pretrained(str(ckpt))
+            # 読み込んだ後で毎歩の予測を重ねる形に切り替える（ACTConfig.from_pretrained は保存した config の
+            # type の欄を読めずに落ちる。LeRobot 0.4.4）
+            from lerobot.policies.act.modeling_act import ACTTemporalEnsembler
+
+            self.p.config.temporal_ensemble_coeff, self.p.config.n_action_steps = ensemble, 1
+            self.p.temporal_ensembler = ACTTemporalEnsembler(ensemble, self.p.config.chunk_size)
         self.p.to(device).eval()
         self.device = device
 
