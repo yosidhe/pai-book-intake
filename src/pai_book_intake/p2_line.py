@@ -644,6 +644,10 @@ def process_book_b(st, k, idx, books, pile, site, shelf, keeper, keeper_ent, tb,
         if spec.book_id in rel:
             dest[i] = gates[i].take(spec.book_id, rel[spec.book_id].clearance_id)
             cleared[i] = True
+    for i in range(n):
+        it = gates[i].items.get(spec.book_id)
+        if alive[i] and not cleared[i] and it is not None and it.hold_reason == "shelf_full":
+            rec["expected_flow"][i] = False  # 本棚に空きが無くて台に残した本は、届かないのが正しい（--shelf-capacity）
     rec["cleared"] = cleared
     rec["destination"] = dest
     if not cleared.any():
