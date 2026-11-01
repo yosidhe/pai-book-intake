@@ -143,6 +143,17 @@ class ReleaseGate:
         it.decision = decision
         self._evaluate(it)
 
+    def outcome(self, book_id: str, hold_table: bool) -> tuple[str | None, str | None]:
+        """査定が終わった時点の行き先と理由（appraisal.done で A へ知らせる）。
+        行き先: shelf・discard（運んでよい）、hold（保留棚へ運ぶ。hold_table のときの HOLDABLE）、
+        tray（台に残して人の判断を待つ）、None（まだ決まらない）"""
+        it = self._get(book_id)
+        if it.state == RELEASED:
+            return it.destination, None
+        if it.state == HELD:
+            return (HOLD if hold_table and it.hold_reason in HOLDABLE else "tray"), it.hold_reason
+        return None, it.state
+
     def holdable(self) -> list[TrayItem]:
         """保留棚へ運べる本（held で、理由が HOLDABLE のどれか）を、置かれた順に返す。"""
         return sorted((it for it in self.items.values() if it.state == HELD and it.hold_reason in HOLDABLE),

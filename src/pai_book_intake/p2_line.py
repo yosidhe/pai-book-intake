@@ -17,8 +17,8 @@
   オブザーバ          全メッセージを見て、止める・箱ごとの報告書を書く
 
 A と B は並行して動く（既定。2026-10-28 ユーザーの要件）
-  - A は、置いた本の査定まで済んだら（査定できるという知らせ）、すぐ次の本を取りに行く。査定台の 2 スロットが
-    両方ふさがっていれば、空くまで待つ
+  - A は、置いた本の査定が終わったら（査定から A への appraisal.done。行き先つき）、すぐ次の本を取りに行く。
+    査定台の 2 スロットが両方ふさがっていれば、空くまで待つ。B の作業待ちの列へはプログラムの中で渡す（通知にしない）
   - B は、査定が済んでいて運んでよい本があれば、置かれた順に運ぶ。無ければ待機位置で待つ
   - 査定台の上に手を入れるのは一度に 1 台だけ（zone["table"]）。もう 1 台は台の手前で待つ
   - --sequential で、前の「1 冊ずつ A → B」に戻せる（比べるため）
@@ -38,6 +38,11 @@ B（台車と腕）が廃棄箱・保留棚・査定台に触れた歩数を毎�
 
 描画は環境 0 だけ（WSL2 の Docker は CPU 描画）。環境 0 以外は、バーコードは本の向き（表紙が上か）から、本棚の空きは
 置いた本の位置から決める（どちらも結果に source として残す）。
+
+A を ACT で動かす（--a-policy act --ckpt <act_train の checkpoint>。03_ACT組込み計画）
+  - 取り出し → 運搬 → 配置 → 待機姿勢を、学習済みの ACT が 50 Hz で動かす（act_a.act_episode と同じ）。置き場所は台帳の空きから
+    選んで観測に入れる。ACT は途中で止められないので、動かし始める前に査定台を確保する
+  - 本の位置と向きは、スクリプト制御と同じく正解値を使う
 
 使い方: python -m pai_book_intake.p2_line --n-envs 1 --books 4
 出力: /workspace/outputs/p2_line/<run_id>/（result.json・bus.jsonl・報告書・inventory.sqlite・動画・バーコード画像・
@@ -95,6 +100,7 @@ B_WAIT_ARM = np.array([0.0, -1.0, 0.0, -2.6, 0.0, 1.6, -0.785])
 NOT_IMPLEMENTED = ["flip (B3)", "standing books in the box (B2)",
                    "standing books on the shelf (keeper fingers jam; 02_確認事項 B8 a/b). The default shelf mode is flat (B8 c)"]
 SHELF_MODES = ("flat", "standing")
+A_POLICIES = ("scripted", "act")
 
 
 def parse_args():
@@ -120,14 +126,22 @@ def parse_args():
                          "「保留棚に積めない」を起こすため（02_確認事項 B14）")
     ap.add_argument("--sequential", action="store_true",
                     help="A と B を並行させず、1 冊ずつ A → B の順に処理する（前の動き。比べるため）")
-    return ap.parse_args()
+    ap.add_argument("--a-policy", choices=A_POLICIES, default="scripted",
+                    help="A の取り出し・運搬・配置・待機姿勢を動かすもの。act = 学習済みの ACT（--ckpt。03_ACT組込み計画）")
+    ap.add_argument("--ckpt", type=Path, help="--a-policy act の checkpoint（act_train の final など）")
+    ap.add_argument("--ensemble", type=float, default=None, help="ACT の temporal ensembling の係数（省略で使わない）")
+    args = ap.parse_args()
+    if args.a_policy == "act" and args.ckpt is None:
+        ap.error("--a-policy act には --ckpt が要る")
+    return args
 
 
 def main() -> None:
     args = parse_args()
     import genesis as gs
 
-    run_id, out, meta = new_run(TRIAL, {k: (str(v.name) if isinstance(v, Path) else v) for k, v in vars(args).items()},
+    run_id, out, meta = new_run(TRIAL, {k: (ckpt_name(v) if k == "ckpt" and v else str(v.name) if isinstance(v, Path) else v)
+                                        for k, v in vars(args).items()},
                                 extra={"genesis": gs.__version__})
     bus = Bus(run_id, out / "bus.jsonl")
     # 読めない本は人の判断待ちとして査定台に残る。台の置き場所は 2 つなので、3 冊続けて読めないまで待つと、3 冊目を置く前に
@@ -153,6 +167,12 @@ def main() -> None:
         result["status"] = classify(bool(result.get("acceptance_ok", False)), error)
         save_result(out, meta, result)
         print(f"run_id={run_id} status={result['status']} out={out}")
+
+
+def ckpt_name(p: Path) -> str:
+    """checkpoint を、絶対パスでなく「act_train の run_id/フォルダ名」で記録する（例: 20261028T160045-6cf9ae/final）"""
+    p = Path(p)
+    return f"{p.parent.name}/{p.name}"
 
 
 # ---------- シーン ----------
@@ -186,7 +206,9 @@ def build(args, out: Path, site, pile_specs):
     scene = gs.Scene(sim_options=gs.options.SimOptions(dt=DT, substeps=4),
                      rigid_options=gs.options.RigidOptions(enable_self_collision=False,
                                                            friction_cone=gs.friction_cone.elliptic,
-                                                           constraint_timeconst=0.01),
+                                                           constraint_timeconst=0.01,
+                                                           # ACT は力の上限を環境ごとに出す（act_a.apply_action）
+                                                           batch_dofs_info=args.a_policy == "act"),
                      vis_options=gs.options.VisOptions(rendered_envs_idx=[0], show_world_frame=False),
                      show_viewer=False)
     scene.add_entity(gs.morphs.Plane(contype=ENV_BIT, conaffinity=ENV_BIT))
@@ -480,6 +502,12 @@ def run(args, run_id: str, out: Path, bus: Bus, obs: Observer, ctx: dict) -> dic
         if name in cams:
             cams[name].start_recording(save_to_filename=str(out / f"{name}_env0.mp4"), fps=25)
             ctx["recording"].append(cams[name])
+    A_POLICY.clear()
+    if args.a_policy == "act":
+        from .act_a import ActPolicy
+
+        pol = ActPolicy(args.ckpt, ensemble=args.ensemble)
+        A_POLICY.update(policy=pol, steps=int(pol.meta["episode_ctrl_steps"]))
     ht = site.raw.get("hold_table")
     if ht is not None:
         HOLD_RULE[:] = [StackRule(max_stack_m=args.hold_max_stack_m if args.hold_max_stack_m is not None
@@ -535,6 +563,9 @@ def run(args, run_id: str, out: Path, bus: Bus, obs: Observer, ctx: dict) -> dic
                       "棚に置いた本は inventory.sqlite に記録した。B（台車と腕）が廃棄箱・保留棚・査定台に触れた歩数が 0（B15）",
         "b_contacts": contact,
         "shelf_mode": args.shelf_mode,
+        "a_policy": args.a_policy,
+        "ckpt": ckpt_name(args.ckpt) if args.ckpt else None,
+        "ensemble": args.ensemble,
         "acceptance_ok": acceptance_ok,
         "books_succeeded_per_env": n_ok, "books_expected_per_env": expected, "shelved_ok_per_env": shelved_ok,
         "inventory": shelf_rows,
@@ -599,10 +630,8 @@ def run_parallel(args, n, pile, common, gates, obs, bus, world, line_stopped) ->
             idx = len(pile) - 1 - k
             dirty = 0 <= args.inject_camera_dirty_from <= k
             st: dict = {"k": k, "idx": idx}
-            yield from g_process_a(k, idx, *common, camera_dirty=dirty, st=st, zone=zone)
-            bus.publish("robot-a-pick", "robot-b-sort", "event", "appraisal.ready",
-                        {"book_id": pile[idx].book_id, "at_book": k})  # 査定が済んだ（B が運べるか見てよい）
-            queue.append(st)
+            yield from g_process_a(k, idx, *common, camera_dirty=dirty, st=st, zone=zone)  # 査定の appraisal.done まで
+            queue.append(st)  # B の作業待ちの列へ（プログラムの中の受け渡し。通知にはしない）
 
     ticker = _Ticker(g_a_worker())
     world.monitors.append(ticker)
@@ -657,6 +686,27 @@ def g_b_wait(rb, steps: int = 120):
     _phase("b_idle")
 
 
+A_POLICY: dict = {}  # --a-policy act のとき {"policy": act_a.ActPolicy, "steps": 1 冊あたりの制御の回数}
+
+
+def g_act_a(ra, policy, steps: int, book, spec, slot_xy: np.ndarray, out: dict):
+    """A の取り出し → 運搬 → 配置 → 待機姿勢を ACT で動かす（act_a.act_episode と同じ中身。50 Hz で観測を読み直す）。
+    歩みを譲るジェネレータ。out["pick"]["lifted"] に、本が 30 mm 以上上がったかを入れる（act_a の評価と同じ基準）"""
+    from .act_a import CTRL_EVERY, apply_action, initial, observe
+
+    init = initial(book, spec)
+    z0 = book.get_pos().cpu().numpy()[:, 2]
+    lift = np.zeros(ra.n)
+    policy.reset()
+    for _ in range(steps):
+        s, e = observe(ra, book, spec, init, slot_xy)
+        apply_action(ra, policy.act(s, e))
+        yield CTRL_EVERY
+        lift = np.maximum(lift, book.get_pos().cpu().numpy()[:, 2] - z0)
+    ra.set_forces_per_env(np.tile(ra.force, (ra.n, 1)))  # 力の上限を既定へ戻す
+    out["pick"] = {"lifted": lift > 0.03, "lift_max_mm": lift * 1000, "ctrl_steps": steps}
+
+
 def g_process_a(k, idx, books, pile, site, shelf, keeper, keeper_ent, tb, bn, station, rbs, ra, rb, world, cams, gates,
                 bus, obs, inv, run_id, out, catalog, shelf_mode: str = "flat", camera_dirty: bool = False,
                 st: dict | None = None, zone: dict | None = None):
@@ -681,23 +731,37 @@ def g_process_a(k, idx, books, pile, site, shelf, keeper, keeper_ent, tb, bn, st
     lower = [(books[j], pile[j]) for j in range(idx)]
     bx = site["box"]
     o: dict = {}
-    bus.publish("robot-a-pick", "observer", "event", "pick.start", {"book_id": spec.book_id})
-    rec["t_sim"] = {"a_start": world.sim_time}
-    yield from g_pick(ra, book, spec, o, lower=lower, surface_z=None if lower else bx["floor"],
-                                  carry_bottom_z=carry_z(book, spec, bx), plate_mode=PLATE_MODE, claw_mode=CLAW_MODE)
-    grip_a = o["grip"]
     slot_xy = np.array([tb["slots"][s] for s in slot])
-    if zone is not None:  # 査定台に B の手が入っている間は、台の手前で待つ
-        while zone.get("table") not in (None, "a"):
-            yield 1
-        zone["table"] = "a"
-    yield from g_move_book(ra, grip_a, slot_xy)
-    yield from g_place_flat(ra, grip_a, tb["top"], o)
-    yield from g_home(ra, 120)
+    if A_POLICY:
+        # ACT は動作の途中で止められない（台の手前で待つことを学んでいない）ので、動かし始める前に台を確保する
+        if zone is not None:
+            while zone.get("table") not in (None, "a"):
+                yield 1
+            zone["table"] = "a"
+        bus.publish("robot-a-pick", "observer", "event", "pick.start", {"book_id": spec.book_id, "policy": "act"})
+        rec["t_sim"] = {"a_start": world.sim_time}
+        yield from g_act_a(ra, A_POLICY["policy"], A_POLICY["steps"], book, spec, slot_xy, o)
+        # 待機姿勢へそろえる（ACT が戻りきらないと、点検カメラに手が写る）。戻りきっていれば動かない
+        yield from g_home(ra, 60)
+        pick_rec = o["pick"]
+    else:
+        bus.publish("robot-a-pick", "observer", "event", "pick.start", {"book_id": spec.book_id})
+        rec["t_sim"] = {"a_start": world.sim_time}
+        yield from g_pick(ra, book, spec, o, lower=lower, surface_z=None if lower else bx["floor"],
+                          carry_bottom_z=carry_z(book, spec, bx), plate_mode=PLATE_MODE, claw_mode=CLAW_MODE)
+        grip_a = o["grip"]
+        if zone is not None:  # 査定台に B の手が入っている間は、台の手前で待つ
+            while zone.get("table") not in (None, "a"):
+                yield 1
+            zone["table"] = "a"
+        yield from g_move_book(ra, grip_a, slot_xy)
+        yield from g_place_flat(ra, grip_a, tb["top"], o)
+        yield from g_home(ra, 120)
+        pick_rec = grip_a.rec
     pb, mb = book_frame(book)
     w, h, t = spec.size_m
     on_table = (np.abs(pb[:, 2] - (tb["top"] + t / 2)) < 0.006) & (np.abs(mb[:, 2, 2]) > 0.97)
-    rec["a"] = {"pick": grip_a.rec, "place": o.get("place", {}), "on_table": on_table, "slot": slot,
+    rec["a"] = {"pick": pick_rec, "place": o.get("place", {}), "on_table": on_table, "slot": slot,
                 "pos_err_from_slot_mm": np.linalg.norm(pb[:, :2] - slot_xy, axis=1) * 1000}
     for i in range(n):
         if not alive[i]:
@@ -709,6 +773,7 @@ def g_process_a(k, idx, books, pile, site, shelf, keeper, keeper_ent, tb, bn, st
         else:
             _result(bus, "robot-a-pick", i, spec, None, "rejected", None, 0, "not_on_table")
             alive[i] = False
+    on_tray = alive.copy()  # 台に載った本（査定の対象）
 
     # ---- 点検カメラ: 本へ向けてバーコードを読む ----
     isbn = [None] * n
@@ -778,6 +843,12 @@ def g_process_a(k, idx, books, pile, site, shelf, keeper, keeper_ent, tb, bn, st
                         {"env": i, "book_id": spec.book_id, "reason": "shelf_geometry", "height_mm": round(h * 1000)})
             gates[i].on_escalated(spec.book_id, "shelf_geometry")
             rec["expected_flow"][i] = False
+    # 査定が終わった（行き先が決まった）ことを A へ知らせる。A はこれを受けてから次の本へ進む（台に載らなかった本は査定しない）
+    for i in range(n):
+        if on_tray[i]:
+            dest, why = gates[i].outcome(spec.book_id, hold_table=hold_on)
+            bus.publish("appraisal", "robot-a-pick", "event", "appraisal.done",
+                        {"env": i, "book_id": spec.book_id, "destination": dest, "reason": why})
     rec["t_sim"]["appraised"] = world.sim_time
     st.update(rec=rec, alive=alive, isbn=isbn, decisions=decisions, skip_b=False)
 

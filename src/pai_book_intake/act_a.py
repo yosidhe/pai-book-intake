@@ -15,6 +15,7 @@
   デモ集め: python -m pai_book_intake.act_a collect --n-envs 32 --seed 1
   評価:     python -m pai_book_intake.act_a eval --policy scripted --n-envs 50 --seed 1000
             python -m pai_book_intake.act_a eval --policy act --ckpt /workspace/outputs/act_train/<run_id>/final
+  比べる:   python -m pai_book_intake.act_a compare <run_a> <run_b>（同じ初期状態の 2 つの run で、片方だけ失敗した本と環境の組）
 出力: /workspace/outputs/act_collect/<run_id>/（demos_<k>.npz・result.json）・/workspace/outputs/act_eval/<run_id>/
 """
 
@@ -40,14 +41,16 @@ ENV_DIM = 20
 TRAIN_JITTER = (0.02, 10.0)  # 学習: 箱の中の本の初期位置 ±20 mm・±10°
 EVAL_JITTER = (0.01, 5.0)  # 評価: ±10 mm・±5°（p2_line と同じ。02_確認事項 B10）
 EVAL_PILE = ("book-09", "book-04", "book-10", "book-03")  # p2_line の既定の平積み（下から上）
+NUDGE_AFTER_S = 1.5  # --nudge: 取り出しを始めてから本をずらすまで（g_pick が手を本の上へ運ぶ 1.5 s の終わり。下ろし始める前）
 POS_TOL_M = 0.025  # 置き場所からのずれの許容（B6 の間隔 20〜25 mm より小さく）
 PARK = (3.0, 3.0)  # 置き終えた本を退ける場所（次の本の邪魔をしない）
 
 
 # ---------- シーン ----------
 
-def build(n_envs: int, out: Path, site, pile_specs, video: bool = False, batch_dofs: bool = False):
-    """batch_dofs: 力の上限を環境ごとに変える（ACT の評価）。評価はスクリプト版も同じ設定で作り、条件をそろえる。"""
+def build(n_envs: int, out: Path, site, pile_specs, video: bool = False, batch_dofs: bool = False, render_env: int = 0):
+    """batch_dofs: 力の上限を環境ごとに変える（ACT の評価）。評価はスクリプト版も同じ設定で作り、条件をそろえる。
+    render_env: 動画に撮る環境の番号"""
     import genesis as gs
 
     from .book_assets import make_book_assets
@@ -59,7 +62,7 @@ def build(n_envs: int, out: Path, site, pile_specs, video: bool = False, batch_d
                      rigid_options=gs.options.RigidOptions(enable_self_collision=False,
                                                            friction_cone=gs.friction_cone.elliptic,
                                                            constraint_timeconst=0.01, batch_dofs_info=batch_dofs),
-                     vis_options=gs.options.VisOptions(rendered_envs_idx=[0], show_world_frame=False),
+                     vis_options=gs.options.VisOptions(rendered_envs_idx=[render_env], show_world_frame=False),
                      show_viewer=False)
     from .hand_design import ENV_BIT
     scene.add_entity(gs.morphs.Plane(contype=ENV_BIT, conaffinity=ENV_BIT))
@@ -80,7 +83,8 @@ def build(n_envs: int, out: Path, site, pile_specs, video: bool = False, batch_d
                                             euler=(0.0, 0.0, math.degrees(ra["yaw"]))))
     cam = None
     if video:
-        cam = scene.add_camera(res=(960, 540), pos=(1.45, -0.75, 0.95), lookat=(0.45, 0.25, 0.1), fov=50, env_idx=0)
+        cam = scene.add_camera(res=(960, 540), pos=(1.45, -0.75, 0.95), lookat=(0.45, 0.25, 0.1), fov=50,
+                               env_idx=render_env)
     scene.build(n_envs=n_envs)
     world = World(scene, n_envs, DT)
     rob = PinchRobot(world, ent_a, "robot-a-pick", HAND, base_xy=tuple(ra["base"]))
@@ -200,6 +204,30 @@ def act_episode(world, r, policy, book, spec, init, slot_xy, steps: int) -> dict
     return {}
 
 
+class Nudge:
+    """World.monitors に入れる。取り出しを始めてから after_s 秒後に、本を水平に dxy[n, 2] だけずらす（外乱。--nudge）。"""
+
+    def __init__(self, world, book, dxy: np.ndarray, after_s: float = NUDGE_AFTER_S):
+        self.world, self.book, self.dxy = world, book, dxy
+        self.at = world.steps + int(round(after_s / world.dt))
+        self.moved_mm = None
+
+    def __call__(self) -> None:
+        if self.world.steps != self.at:
+            return
+        p0 = self.book.get_pos().cpu().numpy()
+        p = p0.copy()
+        p[:, :2] += self.dxy
+        self.book.set_pos(p)
+        self.moved_mm = np.linalg.norm(self.book.get_pos().cpu().numpy()[:, :2] - p0[:, :2], axis=1) * 1000
+
+
+def nudge_dirs(seed: int, k: int, n: int, mm: float) -> np.ndarray:
+    """k 冊目をずらす向き（環境ごと）。本体の乱数とは別の種から作り、方策によらず同じにする。"""
+    a = np.random.default_rng([seed, 7, k]).uniform(0.0, 2 * math.pi, n)
+    return np.stack([np.cos(a), np.sin(a)], 1) * (mm / 1000)
+
+
 def placed_ok(book, spec, site, slot_xy) -> dict:
     from .pinch import book_frame
 
@@ -272,12 +300,51 @@ def parse_args():
     e.add_argument("--pile", default=",".join(EVAL_PILE))
     e.add_argument("--books", type=int, default=4)
     e.add_argument("--video", action="store_true")
+    e.add_argument("--render-env", type=int, default=0, help="動画に撮る環境の番号")
+    e.add_argument("--jitter", type=float, nargs=2, metavar=("POS_M", "YAW_DEG"), default=list(EVAL_JITTER),
+                   help="箱の中の本の初期位置のばらつき（既定は p2_line と同じ ±10 mm・±5°。デモ集めは 0.02 10）")
+    e.add_argument("--nudge", type=float, default=0.0, metavar="MM",
+                   help=f"取り出しを始めて {NUDGE_AFTER_S} s 後（手が本の上に着いたところ）に、本を水平に MM ずらす。"
+                        "向きは種で決める（方策によらず同じ）")
     e.add_argument("--site", type=Path, default=DEFAULT_SITE)
+    m = sub.add_parser("compare")
+    m.add_argument("run_a", type=Path, help="act_eval か act_collect の run のフォルダ")
+    m.add_argument("run_b", type=Path)
     return ap.parse_args()
+
+
+def outcomes(res: dict) -> dict:
+    """result.json の per_book から、(本, 環境) ごとの成否を {(book_id, env): ok} にする。"""
+    return {(b["book_id"], i): bool(ok) for b in res["per_book"] for i, ok in enumerate(b["ok"])}
+
+
+def compare(ra: dict, rb: dict) -> dict:
+    """同じ初期状態の 2 つの run（result.json）で、a だけ失敗した組・b だけ失敗した組・両方失敗した組を出す。
+    種・平積み・環境の数・ばらつき・外乱がそろっていなければ止める（条件の違う run を比べない）。"""
+    for k in ("pile_bottom_to_top", "n_envs", "jitter"):
+        if ra.get(k) != rb.get(k):
+            raise ValueError(f"{k} が違う: {ra.get(k)} / {rb.get(k)}")
+    if ra["args"]["seed"] != rb["args"]["seed"]:
+        raise ValueError(f"seed が違う: {ra['args']['seed']} / {rb['args']['seed']}")
+    if (ra.get("nudge") or None) != (rb.get("nudge") or None):
+        raise ValueError(f"nudge が違う: {ra.get('nudge')} / {rb.get('nudge')}")
+    pa, pb = outcomes(ra), outcomes(rb)
+    common = sorted(set(pa) & set(pb), key=lambda c: (c[1], c[0]))
+    return {"a": ra["run_id"], "b": rb["run_id"], "pairs": len(common),
+            "a_ok": sum(pa[c] for c in common), "b_ok": sum(pb[c] for c in common),
+            "only_a_failed": [list(c) for c in common if not pa[c] and pb[c]],
+            "only_b_failed": [list(c) for c in common if pa[c] and not pb[c]],
+            "both_failed": [list(c) for c in common if not pa[c] and not pb[c]]}
 
 
 def main() -> None:
     args = parse_args()
+    if args.cmd == "compare":
+        import json
+
+        ra, rb = (json.loads((p / "result.json").read_text()) for p in (args.run_a, args.run_b))
+        print(json.dumps(compare(ra, rb), ensure_ascii=False))
+        return
     import genesis as gs
 
     trial = "act_collect" if args.cmd == "collect" else "act_eval"
@@ -311,10 +378,14 @@ def run(args, out: Path) -> dict:
     n = args.n_envs
     gs.init(backend=gs.gpu, seed=args.seed, logging_level="warning")
     t_build = time.time()
+    render_env = getattr(args, "render_env", 0)
+    if not 0 <= render_env < n:
+        raise ValueError(f"--render-env は 0〜{n - 1}")
     scene, world, r, books, cam = build(n, out, site, pile, video=getattr(args, "video", False),
-                                       batch_dofs=args.cmd == "eval")
+                                       batch_dofs=args.cmd == "eval", render_env=render_env)
     build_s = time.time() - t_build
-    jitter = TRAIN_JITTER if args.cmd == "collect" else EVAL_JITTER
+    jitter = TRAIN_JITTER if args.cmd == "collect" else tuple(args.jitter)
+    nudge_mm = getattr(args, "nudge", 0.0)
     stack(books, pile, site, n, rng, jitter)
     world.step(100)
     slots = np.array(site["appraisal_table"]["slots"])
@@ -324,7 +395,7 @@ def run(args, out: Path) -> dict:
         policy = ActPolicy(args.ckpt, ensemble=args.ensemble)
         steps_act = int(policy.meta["episode_ctrl_steps"])
     if cam is not None:
-        cam.start_recording(save_to_filename=str(out / "overview_env0.mp4"), fps=25)
+        cam.start_recording(save_to_filename=str(out / f"overview_env{render_env}.mp4"), fps=25)
         world.monitors.append(lambda: world.steps % 4 == 0 and cam.render())
     t0 = time.time()
     per_book = []
@@ -336,16 +407,24 @@ def run(args, out: Path) -> dict:
         init = initial(book, spec)
         rec = Recorder(r, book, spec, init, slot_xy)
         world.monitors.append(rec)
+        nudge = None
+        if nudge_mm > 0:
+            nudge = Nudge(world, book, nudge_dirs(args.seed, k, n, nudge_mm))
+            world.monitors.append(nudge)
         if policy is None:
             info = scripted_episode(world, r, book, spec, [(books[j], pile[j]) for j in range(idx)], site, slot_xy)
         else:
             policy.reset()
             info = act_episode(world, r, policy, book, spec, init, slot_xy, steps_act)
         world.monitors.remove(rec)
+        if nudge is not None:
+            world.monitors.remove(nudge)
         res = placed_ok(book, spec, site, slot_xy)
         lifted = rec.lift_max > 0.03
         row = {"book_id": spec.book_id, "ctrl_steps": len(rec.A), "lifted": lifted, **res,
                **{k2: v for k2, v in info.items()}}
+        if nudge is not None:
+            row["nudge_moved_mm"] = nudge.moved_mm
         per_book.append(row)
         print(f"[{k}] {spec.book_id} lifted {int(lifted.sum())}/{n} placed_ok {int(res['ok'].sum())}/{n} "
               f"wall {time.time() - t0:.0f}s", flush=True)
@@ -367,6 +446,8 @@ def run(args, out: Path) -> dict:
         "criterion": "act_a_" + args.cmd,
         "pile_bottom_to_top": pile_ids,
         "jitter": {"pos_m": jitter[0], "yaw_deg": jitter[1]},
+        "nudge": {"mm": nudge_mm, "after_s": NUDGE_AFTER_S} if nudge_mm > 0 else None,
+        "render_env": render_env if cam is not None else None,
         "pos_tol_mm": POS_TOL_M * 1000,
         "n_envs": n,
         "per_book_ok": ok.sum(1), "per_book_lifted": lifted.sum(1),
@@ -374,6 +455,7 @@ def run(args, out: Path) -> dict:
         "box_all_ok": int(ok.all(0).sum()),
         "sim_time_s": world.sim_time, "wall_build_s": build_s, "wall_run_s": wall,
         "per_book": per_book,
+        "failed_pairs": [[b["book_id"], int(i)] for b in per_book for i in np.nonzero(~b["ok"])[0]],
     }
     if args.cmd == "collect":
         res["acceptance"] = "デモとして使える（置き場所に平らに置けた）エピソードが 1 つ以上ある"

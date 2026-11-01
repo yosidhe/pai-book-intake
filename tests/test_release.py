@@ -304,3 +304,24 @@ def test_hold_delivery_failure_leaves_the_book_held(tmp_path):
     g.take("book-03", it.clearance_id)
     g.on_delivered("book-03", False)
     assert it.state == HELD and it.hold_reason == "delivery_failed"
+
+
+def test_outcome_after_appraisal(tmp_path):
+    """appraisal.done で A へ知らせる行き先: 運んでよい本は shelf・discard、査定できなかった本は保留棚があれば hold・
+    無ければ tray、本棚が満杯の本は保留棚があっても tray（B14-3）"""
+    _, g = make(tmp_path, shelf_capacity=1)
+    ready(g, "book-03")  # 棚
+    ready(g, "book-05")  # 棚（満杯）
+    ready(g, "book-04")  # 廃棄
+    unreadable(g, "book-06")
+    assert g.outcome("book-03", hold_table=True) == ("shelf", None)
+    assert g.outcome("book-04", hold_table=True) == ("discard", None)
+    assert g.outcome("book-05", hold_table=True) == ("tray", "shelf_full")
+    assert g.outcome("book-06", hold_table=True) == ("hold", "barcode_unreadable")
+    assert g.outcome("book-06", hold_table=False) == ("tray", "barcode_unreadable")
+
+
+def test_outcome_before_appraisal_is_not_decided(tmp_path):
+    _, g = make(tmp_path)
+    ready(g, "book-03", appraised=False)
+    assert g.outcome("book-03", hold_table=True) == (None, "scanned")
