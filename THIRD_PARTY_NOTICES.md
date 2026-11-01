@@ -12,4 +12,4 @@
 | PyTorch 2.8.0 | 計算基盤 | BSD-3-Clause | https://pytorch.org | pip で導入 |
 | Poly Haven のアセット（予定） | 箱・棚・回収箱の見た目 | CC0 | https://polyhaven.com/license | 採用したアセット名をここに追記する |
 | Kenney Conveyor Kit（予定） | コンベアの見た目 | CC0 | https://kenney-assets.itch.io/conveyor-kit | 搬送の物理は自作 |
-| 国立国会図書館書誌データ（国立国会図書館サーチ API） | 書籍10冊の書誌（`assets/catalog/books_v1.json`） | 国立国会図書館が作成し提供する書誌データは CC BY 4.0 互換（[データプロバイダ一覧](https://ndlsearch.ndl.go.jp/help/api/provider)の「国立国会図書館蔵書」） | https://ndlsearch.ndl.go.jp/api/sru （SRU, dpid=iss-ndl-opac） | 出典：国立国会図書館書誌データ（2026年10月11日に取得）。国立国会図書館サーチのAPIを利用。題名・著者・出版者・出版年・ページ数・大きさを抜き出して整形し、寸法・推定重さは本プロジェクトが計算した（国立国会図書館が作成したものではない）。NDL 以外の機関が作成した書誌は使わない。価格・状態・本当の重さは架空。表紙は自作のダミーで、実在の書影は使わない |
+| 国立国会図書館書誌データ（国立国会図書館サーチ API） | 書籍10冊の書誌（`assets/catalog/books_v1.json`） | 国立国会図書館ウェブサイトのコンテンツ利用規約に基づき、営利・非営利を問わず無償で利用可能（[書誌データ等の利用について](https://www.ndl.go.jp/jp/data/data_service/quickguide/index.html)。2026-11-01 に確認） | https://ndlsearch.ndl.go.jp/api/sru （SRU, dpid=iss-ndl-opac） | 出典：国立国会図書館書誌データ（2026年10月11日に取得）。国立国会図書館サーチのAPIを利用。題名・著者・出版者・出版年・ページ数・大きさを抜き出して整形し、寸法・推定重さは本プロジェクトが計算した（国立国会図書館が作成したものではない）。NDL 以外の機関が作成した書誌は使わない。価格・状態・本当の重さは架空。表紙は自作のダミーで、実在の書影は使わない |

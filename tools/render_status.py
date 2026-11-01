@@ -133,9 +133,10 @@ def render(d: dict) -> str:
                    f'y2="{cy - math.sin(a) * rad * 1.9:.1f}" stroke="{c}" stroke-width="3" marker-end="url(#arr)"/>')
         out.append(t(cx, cy + 5, r["label"].replace("ロボット ", ""), 15, "bold", c, "middle"))
         ty = cy + rad + 18 if r["y"] < 0.5 else cy - rad - 40
-        out.append(t(cx - 150 if r["x"] < 0.3 else cx, ty, f'{r["label"]}（{r["task"]}）', 12, "bold"))
+        tx = min(cx - 150 if r["x"] < 0.3 else cx, px0 + pw - 300)  # 枠の右にはみ出さない
+        out.append(t(tx, ty, f'{r["label"]}（{r["task"]}）', 12, "bold"))
         for i, line in enumerate(wrap(r["role"], 290, 11)):
-            out.append(t(cx - 150 if r["x"] < 0.3 else cx, ty + 15 + i * 14, line, 11, fill=SUB))
+            out.append(t(tx, ty + 15 + i * 14, line, 11, fill=SUB))
 
     # ---- 処理フロー（右上） ----
     fx0, fy0, fw, fh = 640, 90, 1020, 560
@@ -188,12 +189,21 @@ def render(d: dict) -> str:
     out.append(badge(ox + 8, oy + 60, ob["status"]))
     for i, it in enumerate(ob["items"]):
         out.append(t(ox + 10, oy + 82 + i * 16, "・" + it, 11))
-    # 裏返しの右に、記録
+    # 裏返しの右: 記録と改善の材料（YAML の flow.nodes に id: improve があればそれを描く）
     sx = pos["appraise"][0]
-    out.append(f'<rect x="{sx}" y="{oy}" width="{2 * cw + 14}" height="150" rx="6" fill="#fff" stroke="{LINE}"/>')
-    out.append(t(sx + 10, oy + 22, "記録（全工程 → bus.jsonl）", 14, "bold"))
-    for i, s in enumerate(["メッセージは run_id 付きで bus.jsonl に先に書く", "修正依頼・好評価は前工程の records へ"]):
-        out.append(t(sx + 10, oy + 46 + i * 18, "・" + s, 11))
+    im = nodes.get("improve")
+    if im is not None:
+        c = STATUS[im["status"]][0]
+        out.append(f'<rect x="{sx}" y="{oy}" width="{2 * cw + 14}" height="150" rx="6" fill="#fff" stroke="{c}" '
+                   f'stroke-width="2"{dash(im["status"])}/>')
+        out.append(t(sx + 10, oy + 22, im["label"], 14, "bold"))
+        out.append(t(sx + 10, oy + 40, f'{im["actor"]}（全工程の記録 bus.jsonl から）', 11, fill=SUB))
+        out.append(badge(sx + 8, oy + 60, im["status"]))
+        for i, it in enumerate(im["items"]):
+            out.append(t(sx + 10, oy + 82 + i * 16, "・" + it, 11))
+    else:
+        out.append(f'<rect x="{sx}" y="{oy}" width="{2 * cw + 14}" height="150" rx="6" fill="#fff" stroke="{LINE}"/>')
+        out.append(t(sx + 10, oy + 22, "記録（全工程 → bus.jsonl）", 14, "bold"))
 
     # ---- 動作状況と残タスク（下） ----
     by0 = 670
