@@ -1,4 +1,4 @@
-"""act_a の比べ方・外乱の向き（GPU を使わない部分）と、p2_line の checkpoint の記録のしかた。"""
+"""act_a の比べ方・外乱の向き（GPU を使わない部分）と、p2_line の checkpoint の記録のしかた・停止後の数え方。"""
 
 from pathlib import Path
 
@@ -51,3 +51,13 @@ def test_p2_line_records_ckpt_without_absolute_path():
     from pai_book_intake.p2_line import ckpt_name
 
     assert ckpt_name(Path("/workspace/outputs/act_train/20261028T160045-6cf9ae/final")) == "20261028T160045-6cf9ae/final"
+
+
+def test_book_a_failed_is_still_counted_after_a_stop():
+    """止まった後に台に残した本だけが「届かないのが正しい」。A が台に置けなかった本は失敗に数える"""
+    from pai_book_intake.p2_line import left_on_tray_after_stop
+
+    assert left_on_tray_after_stop(stopped=True, cleared=False, on_tray=True)
+    assert not left_on_tray_after_stop(stopped=True, cleared=False, on_tray=False)  # A の失敗（not_on_table）
+    assert not left_on_tray_after_stop(stopped=False, cleared=False, on_tray=True)
+    assert not left_on_tray_after_stop(stopped=True, cleared=True, on_tray=True)

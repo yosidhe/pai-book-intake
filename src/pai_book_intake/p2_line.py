@@ -853,6 +853,13 @@ def g_process_a(k, idx, books, pile, site, shelf, keeper, keeper_ent, tb, bn, st
     st.update(rec=rec, alive=alive, isbn=isbn, decisions=decisions, skip_b=False)
 
 
+def left_on_tray_after_stop(stopped: bool, cleared: bool, on_tray: bool) -> bool:
+    """届かないのが正しい本か（オブザーバが箱を止めた後、A が台に置いた本に B が触れない）。A は並行して動くので、止まる前に
+    取り出して台に置いた本がありうる（20261101T033205-3697ce の book-10）。A が台に置けなかった本（not_on_table）は
+    失敗のまま数える（ACT の通し試験 20261101T121659-b9808a で、A の失敗 3 冊が分母から抜けて succeeded になった）"""
+    return bool(stopped and not cleared and on_tray)
+
+
 def process_book_b(st, k, idx, books, pile, site, shelf, keeper, keeper_ent, tb, bn, station, rbs, ra, rb, world, cams,
                    gates, bus, obs, inv, run_id, out, catalog, shelf_mode: str = "flat", zone: dict | None = None) -> dict:
     """B の工程（査定が済んだ本を許可を確かめて取り、本棚か廃棄箱へ運ぶ）。g_process_a の st を受け取る。
@@ -901,9 +908,7 @@ def process_book_b(st, k, idx, books, pile, site, shelf, keeper, keeper_ent, tb,
         it = gates[i].items.get(spec.book_id)
         if alive[i] and not cleared[i] and it is not None and it.hold_reason in ("shelf_full", FULL_REASON):
             rec["expected_flow"][i] = False  # 本棚に空きが無くて台に残した本は、届かないのが正しい（--shelf-capacity）
-        if obs.is_stopped(i) and not cleared[i]:
-            # オブザーバが箱を止めた後は、台に残った本に触れないのが正しい。A は並行して動くので、止まる前に取り出して
-            # 台に置いた本がありうる（20261101T033205-3697ce の book-10）
+        if left_on_tray_after_stop(obs.is_stopped(i), cleared[i], rec["a"]["on_table"][i]):
             rec["expected_flow"][i] = False
     rec["cleared"] = cleared
     rec["destination"] = dest
