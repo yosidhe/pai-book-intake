@@ -694,6 +694,16 @@ A_STILL_DOF_VEL = 0.01  # これより遅ければ止まったとみなす（関
 A_STILL_MAX_WAIT = 300  # 止まるまで待つ上限の歩数（3 s）。止まらなくても先へ進み、settled=False として残す
 
 
+A_PLACE_MAX_ERR_M = 0.05  # 置き場所からこれより離れた本は、台に置けたと数えない
+
+
+def placed_on_table(pb: np.ndarray, mb: np.ndarray, table_top: float, thickness: float, slot_xy: np.ndarray) -> np.ndarray:
+    """A が台に置けたか。高さと傾きに加えて、置き場所からの距離も見る（箱の中の本が、高さだけ台と同じになることがある。
+    20261101T193355-c5cd17 の環境 7 の book-05）"""
+    level = (np.abs(pb[:, 2] - (table_top + thickness / 2)) < 0.006) & (np.abs(mb[:, 2, 2]) > 0.97)
+    return level & (np.linalg.norm(pb[:, :2] - slot_xy, axis=1) < A_PLACE_MAX_ERR_M)
+
+
 def tray_slots_used(a_policy: str, slots: list) -> int:
     """査定台で使う置き場所の数。ACT は学習した置き場所が今も同じ 1 つ目（0.25）だけを使う（2 つ目は学習のときの 0.53 から 0.56 へ変わった）"""
     return 1 if a_policy == "act" else len(slots)
@@ -732,7 +742,7 @@ def g_act_a(ra, policy, steps: int, book, spec, slot_xy: np.ndarray, out: dict):
         yield CTRL_EVERY
         lift = np.maximum(lift, book.get_pos().cpu().numpy()[:, 2] - z0)
     ra.set_forces_per_env(np.tile(ra.force, (ra.n, 1)))  # 力の上限を既定へ戻す
-    out["pick"] = {"lifted": lift > 0.03, "lift_max_mm": lift * 1000, "ctrl_steps": steps}
+    out["pick"] = {"lifted": lift > 0.03, "lift_max_mm": lift * 1000, "ctrl_steps": steps, "init_bottom_z": init["bottom_z"]}
 
 
 def g_process_a(k, idx, books, pile, site, shelf, keeper, keeper_ent, tb, bn, station, rbs, ra, rb, world, cams, gates,
@@ -790,7 +800,7 @@ def g_process_a(k, idx, books, pile, site, shelf, keeper, keeper_ent, tb, bn, st
         pick_rec = grip_a.rec
     pb, mb = book_frame(book)
     w, h, t = spec.size_m
-    on_table = (np.abs(pb[:, 2] - (tb["top"] + t / 2)) < 0.006) & (np.abs(mb[:, 2, 2]) > 0.97)
+    on_table = placed_on_table(pb, mb, tb["top"], t, slot_xy)
     rec["a"] = {"pick": pick_rec, "place": o.get("place", {}), "on_table": on_table, "slot": slot,
                 "pos_err_from_slot_mm": np.linalg.norm(pb[:, :2] - slot_xy, axis=1) * 1000}
     for i in range(n):

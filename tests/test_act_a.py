@@ -152,3 +152,21 @@ def test_choose_slots_first_only_keeps_the_same_random_draws():
     assert {float(x) for x in both[:, 0]} == {0.25, 0.56}
     assert np.allclose(first, slots[0])
     assert ra.integers(0, 1000) == rb.integers(0, 1000)  # 次の本の乱数がずれない
+
+
+def test_placed_on_table_needs_height_flatness_and_distance():
+    from pai_book_intake.p2_line import placed_on_table
+
+    top, t, slot = 0.2, 0.01, np.array([[0.25, 0.5]] * 4)
+    pb = np.array([[0.26, 0.5, top + t / 2],  # 置けた
+                   [0.25, 0.549, top + t / 2],  # 50 mm 以内
+                   [0.25, 0.551, top + t / 2],  # 高さは合うが 50 mm を超える
+                   [0.25, 0.5, top + t / 2 + 0.01]])  # 位置は合うが高さが違う
+    flat = np.tile(np.eye(3), (4, 1, 1))
+    assert placed_on_table(pb, flat, top, t, slot).tolist() == [True, True, False, False]
+    tilted = flat.copy()
+    tilted[0, 2, 2] = 0.9
+    assert not placed_on_table(pb, tilted, top, t, slot)[0]
+    upside_down = flat.copy()
+    upside_down[0, 2, 2] = -1.0
+    assert placed_on_table(pb, upside_down, top, t, slot)[0]  # 裏向きの本も置けたと数える
