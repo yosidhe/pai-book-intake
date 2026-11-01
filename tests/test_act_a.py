@@ -61,3 +61,18 @@ def test_book_a_failed_is_still_counted_after_a_stop():
     assert not left_on_tray_after_stop(stopped=True, cleared=False, on_tray=False)  # A の失敗（not_on_table）
     assert not left_on_tray_after_stop(stopped=False, cleared=False, on_tray=True)
     assert not left_on_tray_after_stop(stopped=True, cleared=True, on_tray=True)
+
+
+def test_face_down_book_is_given_to_act_as_face_up():
+    """p2_line の裏向き（x 軸まわりに 180°）の本は、ACT に渡すときだけ表向きと同じ向きの数値になる。表向きはそのまま"""
+    from pai_book_intake.act_a import face_up_frame
+    from pai_book_intake.geometry import quat_mul, quat_to_mat, quat_z
+
+    q = quat_z(np.radians([30.0, -8.0]))
+    down = quat_mul(q, np.broadcast_to(np.array([0.0, 1.0, 0.0, 0.0]), (2, 4)))
+    up_m = quat_to_mat(q)
+    mixed = np.stack([quat_to_mat(down)[0], up_m[1]])  # 1 冊目は裏向き・2 冊目は表向き
+    got = face_up_frame(mixed)
+    assert np.allclose(got, up_m)
+    assert np.allclose(got[:, :, 0], mixed[:, :, 0])  # 背の向き（x 軸）は変えない
+    assert np.allclose(mixed[0, :, 2], [0.0, 0.0, -1.0])  # 渡す前の値は変えない（コピーして直す）

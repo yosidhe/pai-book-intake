@@ -699,7 +699,7 @@ def g_act_a(ra, policy, steps: int, book, spec, slot_xy: np.ndarray, out: dict):
     lift = np.zeros(ra.n)
     policy.reset()
     for _ in range(steps):
-        s, e = observe(ra, book, spec, init, slot_xy)
+        s, e = observe(ra, book, spec, init, slot_xy, face_up=True)  # 裏向きの本は表向きの数値にして渡す（本は動かさない）
         apply_action(ra, policy.act(s, e))
         yield CTRL_EVERY
         lift = np.maximum(lift, book.get_pos().cpu().numpy()[:, 2] - z0)

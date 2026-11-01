@@ -117,13 +117,26 @@ def force_idx(r) -> list[int]:
     return [r.i(k) for k in FORCE_DOFS]
 
 
-def observe(r, book, spec, init: dict, slot_xy: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+def face_up_frame(mb: np.ndarray) -> np.ndarray:
+    """裏向き（本の z 軸の z 成分 < 0）の本だけ、y 軸と z 軸の符号を反転して、表向きの本と同じ数値にする（本は直方体なので、
+    背の向き＝x 軸のまわりに 180° 回しても形は同じ）。p2_line の裏向きは x 軸まわりの 180° で作っている。
+    デモに裏向きの本が無く、z 軸の z 成分のばらつき（env_std）が 0.001 なので、裏向きのまま渡すと正規化で約 -2000 になる"""
+    m = mb.copy()
+    down = m[:, 2, 2] < 0
+    m[down, :, 1:3] *= -1.0
+    return m
+
+
+def observe(r, book, spec, init: dict, slot_xy: np.ndarray, face_up: bool = False) -> tuple[np.ndarray, np.ndarray]:
+    """face_up: 裏向きの本を表向きと同じ数値にして渡す（ACT に渡すとき。デモの記録では使わない）"""
     from .pinch import book_frame
 
     q = r.e.get_qpos().cpu().numpy()
     f = r.force_now[:, force_idx(r)]
     state = np.concatenate([q, f], 1)
     pb, mb = book_frame(book)
+    if face_up:
+        mb = face_up_frame(mb)
     n = r.n
     env = np.concatenate([pb, mb[:, :, 0], mb[:, :, 2], np.tile(spec.size_m, (n, 1)), init["pos"], init["e"], slot_xy,
                           init["bottom_z"][:, None]], 1)
@@ -198,7 +211,7 @@ def scripted_episode(world, r, book, spec, lower, site, slot_xy) -> dict:
 def act_episode(world, r, policy, book, spec, init, slot_xy, steps: int) -> dict:
     """方策の行動を 50 Hz で効かせる。steps は制御の回数（デモの最長＋余裕。学習の meta にある）。"""
     for _ in range(steps):
-        s, e = observe(r, book, spec, init, slot_xy)
+        s, e = observe(r, book, spec, init, slot_xy, face_up=True)
         apply_action(r, policy.act(s, e))
         world.step(CTRL_EVERY)
     return {}
