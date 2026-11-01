@@ -62,7 +62,7 @@ from .books import DEFAULT_CATALOG, SURFACES, load_catalog
 from .bus import Bus
 from .geometry import quat_to_mat, quat_z
 from .hand_design import ENV_BIT, PinchHand
-from .hold import FULL_REASON, HOLDABLE, StackRule, TopBook, plan_stack
+from .hold import FULL_REASON, HOLDABLE, StackRule, TopBook, inset_from_edge, plan_stack
 from .inventory import Inventory, Placement
 from .keeper import (BASE_T, KeeperSpec, choose_flat_slot, choose_slot, choose_stack, flat_book_center_y, free_spans,
                      keeper_mjcf, occupancy_from_points, spans_from_books)
@@ -261,15 +261,18 @@ class ContactCounter:
     手が取る面・置く面に触れるのは SURFACE_PHASES のとおり別に数える（廃棄箱は床だけ。壁は数える）。
     触れ始めた所ごとに、そのときの工程（phase）・B の部品・シミュの中の時刻と長さを残す（どこで当たったかを探すため）"""
 
-    def __init__(self, robot, obstacles: dict, world):
+    def __init__(self, robot, obstacles: dict, world, diagnostic: dict | None = None):
+        """diagnostic: 数えるが合格の条件に入れない物（{名前: 物体の列}）。例: 本（B が隣の本に触れたかを探すため）"""
         import torch
 
         self.e, self.world, self.n, self.robot = robot.e, world, world.n, robot
         self.links = robot.e._solver.links
-        self.names = sorted(obstacles)
-        self.ranges = {k: [(int(o.geom_start), int(o.geom_end)) for o in v] for k, v in obstacles.items()}
+        self.counted = sorted(obstacles)
+        allv = {**obstacles, **(diagnostic or {})}
+        self.names = sorted(allv)
+        self.ranges = {k: [(int(o.geom_start), int(o.geom_end)) for o in v] for k, v in allv.items()}
         # 置き面: 査定台と保留棚は全部、廃棄箱は床（_open_box の最初の物体）だけ
-        self.surface = {k: self.ranges[k][:1] if k == "bin" else self.ranges[k] for k in self.names}
+        self.surface = {k: self.ranges[k][:1] if k == "bin" else self.ranges[k] for k in self.counted}
         arm = {"base"} | {f"link{j}" for j in range(8)}
         hand = [int(lk.idx) for lk in robot.e.links if lk.name not in arm]
         self.hand_names = sorted(lk.name for lk in robot.e.links if lk.name not in arm)
@@ -307,7 +310,7 @@ class ContactCounter:
             hand = self.is_hand.to(own_link.device)[own_link.long()]
             for j, k in enumerate(self.names):
                 m = self._in(other, self.ranges[k]) & vm
-                if self.phase in SURFACE_PHASES[k]:
+                if self.phase in SURFACE_PHASES.get(k, ()):
                     s = m & hand & self._in(other, self.surface[k])
                     surf[j] = s.any(dim=1).cpu().numpy()
                     m = m & ~s
@@ -336,13 +339,18 @@ class ContactCounter:
             self.prev[k] = hit[j]
 
     def summary(self) -> dict:
-        per_env = [int(sum(self.steps[k][i] for k in self.names)) for i in range(self.n)]
+        per_env = [int(sum(self.steps[k][i] for k in self.counted)) for i in range(self.n)]
         by_phase: dict = {}
         for ep in self.episodes:
+            if ep["obstacle"] not in self.counted:
+                continue
             key = f"{ep['obstacle']}@{ep['phase']}"
             by_phase[key] = by_phase.get(key, 0) + 1
-        return {"steps_in_contact": {k: v.tolist() for k, v in self.steps.items()}, "total_steps_per_env": per_env,
-                "episodes_by_obstacle_phase": by_phase, "episodes": self.episodes,
+        return {"steps_in_contact": {k: v.tolist() for k, v in self.steps.items() if k in self.counted},
+                "total_steps_per_env": per_env,
+                "episodes_by_obstacle_phase": by_phase,
+                "episodes": [ep for ep in self.episodes if ep["obstacle"] in self.counted],
+                "diagnostic_episodes": [ep for ep in self.episodes if ep["obstacle"] not in self.counted],
                 "hand_on_surface_steps": {k: v.tolist() for k, v in self.surface_steps.items()},
                 "hand_links": self.hand_names, "surface_phases": SURFACE_PHASES,
                 "note": "B（台車と腕）の geom と障害物の接触。本と箱の接触は数えない。手が取る面・置く面に触れた歩数は"
@@ -444,7 +452,8 @@ def run(args, run_id: str, out: Path, bus: Bus, obs: Observer, ctx: dict) -> dic
     t_build = time.time()
     scene, world, ra, rb, books, keeper_ent, keeper, cams, obstacles = build(args, out, site, pile)
     build_s = time.time() - t_build
-    contacts = ContactCounter(rb, obstacles, world)
+    # 本は合格の条件に入れずに数える（B が取る本の隣の本に触れたかを探すため。obstacle_parts は平積みの下からの番号）
+    contacts = ContactCounter(rb, obstacles, world, diagnostic={"books": books})
     CONTACTS[:] = [contacts]
     world.monitors.append(contacts)
     bus.set_sim_clock(lambda: world.sim_time)
@@ -821,6 +830,10 @@ def process_book_b(st, k, idx, books, pile, site, shelf, keeper, keeper_ent, tb,
         it = gates[i].items.get(spec.book_id)
         if alive[i] and not cleared[i] and it is not None and it.hold_reason in ("shelf_full", FULL_REASON):
             rec["expected_flow"][i] = False  # 本棚に空きが無くて台に残した本は、届かないのが正しい（--shelf-capacity）
+        if obs.is_stopped(i) and not cleared[i]:
+            # オブザーバが箱を止めた後は、台に残った本に触れないのが正しい。A は並行して動くので、止まる前に取り出して
+            # 台に置いた本がありうる（20261101T033205-3697ce の book-10）
+            rec["expected_flow"][i] = False
     rec["cleared"] = cleared
     rec["destination"] = dest
     if not cleared.any():
@@ -839,8 +852,27 @@ def process_book_b(st, k, idx, books, pile, site, shelf, keeper, keeper_ent, tb,
     grip_b = o_b["grip"]
     rec["b_pick"] = grip_b.rec
     delivered = np.zeros(n, bool)
-    to_shelf = np.array([d == "shelf" for d in dest]) & cleared
-    to_bin = np.array([d == "discard" for d in dest]) & cleared
+    # 持ち上げられなかった本は運ばない（手だけで運ぶと、行き先は台の上の本の位置から計算されるので、腕が大きく振れて
+    # 廃棄箱に当たった。20261101T022539-b34495 の book-09）。手を開いて HOME へ戻し、本は台に残す（届かなかった扱い）
+    lifted = np.asarray(grip_b.rec.get("lifted", np.ones(n, bool)), bool)
+    failed = cleared & ~lifted
+    if failed.any():
+        bus.publish("robot-b-sort", "observer", "event", "escalation",
+                    {"env": int(np.argmax(failed)), "book_id": spec.book_id, "reason": "b_pick_failed"})
+        _phase("b_pick_failed_release")
+        rb.unfreeze()
+        rb.freeze(~failed)
+        FL, FR = rb.i("finger_l_joint"), rb.i("finger_r_joint")
+        run_generators(world, [g_joints(rb, [FL, FR], np.full((n, 2), rb.design.finger_open_m), 40)])
+        g_up = rb.gripper.get_pos().cpu().numpy()
+        g_up[:, 2] += 0.10
+        run_generators(world, [g_cart_chain(rb, g_up, rb.gripper.get_quat().cpu().numpy(), 60, n_way=6, profile=min_jerk)])
+        run_generators(world, [g_home(rb, 120)])
+        rb.unfreeze()
+        rb.freeze(~cleared | failed)
+    rec["b_pick_failed"] = failed
+    to_shelf = np.array([d == "shelf" for d in dest]) & cleared & ~failed
+    to_bin = np.array([d == "discard" for d in dest]) & cleared & ~failed
     if to_bin.any():
         rb.unfreeze()
         rb.freeze(~to_bin)
@@ -873,7 +905,7 @@ def process_book_b(st, k, idx, books, pile, site, shelf, keeper, keeper_ent, tb,
             BIN_TOP[int(i)] = max(BIN_TOP.get(int(i), bn["floor"]), float(pb[i, 2] + t / 2))
         rec["bin"] = {"move": mv, "place": o_b.get("place", {}), "surface_z": surf, "in_bin_flat": in_bin,
                       "book_pos": pb, "book_x_axis_xy": mb[:, :2, 0]}
-    to_hold = np.array([d == HOLD for d in dest]) & cleared
+    to_hold = np.array([d == HOLD for d in dest]) & cleared & ~failed
     if to_hold.any():
         rec["hold"] = place_on_hold(rb, grip_b, book, spec, ht, world, to_hold, hold_plans, o_b, leave_table)
         delivered |= to_hold & rec["hold"]["in_hold_flat"]
@@ -886,7 +918,7 @@ def process_book_b(st, k, idx, books, pile, site, shelf, keeper, keeper_ent, tb,
                              run_id, out, to_shelf, dest, isbn, decisions, k)
         delivered |= to_shelf & rec["shelf"]["ok"]
     rb.unfreeze()
-    if not (cleared & ~delivered).any():  # 本を持ったまま戻ったとき（本棚に空きが無かったなど）は、たたまない
+    if not (cleared & ~delivered & ~failed).any():  # 本を持ったまま戻ったとき（本棚に空きが無かったなど）は、たたまない
         run_generators(world, [g_b_wait(rb)])  # 待機位置で腕をたたむ（点検カメラに写り込まないように）
     for i in range(n):
         if not cleared[i]:
@@ -1019,7 +1051,9 @@ def place_on_hold(rb, grip, book, spec, ht, world, mask, plans, o_b, leave_table
     g_lift_and_swing(rb, grip, tgt, np.maximum(surf + 0.05, SWING_BOTTOM_Z), world, mv)
     leave_table()  # 本を持って保留棚の上へ移った
     _phase("hold_place")
-    run_generators(world, [g_place_flat(rb, grip, surf, o_b)])
+    # 放すときに指を全開にすると、小口の側の壁が奥へ動いて、下の本の上の本を押した（20261101T033205-3697ce の book-05 は
+    # 65 mm・book-03 は 42 mm ずれ、山が階段のようにずれた）。廃棄箱と同じく少しだけ開く
+    run_generators(world, [g_place_flat(rb, grip, surf, o_b, release_open=BIN_RELEASE_OPEN)])
     _phase("hold_home")
     run_generators(world, [g_home(rb, 120)])
     pb, mb = book_frame(book)
@@ -1027,14 +1061,20 @@ def place_on_hold(rb, grip, book, spec, ht, world, mask, plans, o_b, leave_table
     on_table = ((np.abs(pb[:, 0] - ht["center"][0]) < ht["size"][0] / 2) & (np.abs(pb[:, 1] - ht["center"][1]) < ht["size"][1] / 2))
     level = np.abs(pb[:, 2] - (surf + t / 2)) < 0.006
     ok = mask & on_table & level & (tilt < 3.0)
+    support = np.full(n, np.nan)
+    for i in np.nonzero(mask)[0]:
+        i = int(i)
+        below = HOLD_TOP.get(i)  # 置く前のいちばん上の本（1 冊目は台）
+        support[i] = (inset_from_edge(pb[i, :2], ht["center"], 0.0, ht["size"]) if below is None
+                      else inset_from_edge(pb[i, :2], below.center_xy, below.yaw, below.size_xy))
     for i in np.nonzero(ok)[0]:
         i = int(i)
         HOLD_TOP[i] = TopBook(center_xy=(float(pb[i, 0]), float(pb[i, 1])),
                               yaw=float(math.atan2(mb[i, 1, 0], mb[i, 0, 0])), size_xy=(float(w), float(h)),
-                              top_z=float(pb[i, 2] + t / 2), tilt_deg=float(tilt[i]))
+                              top_z=float(pb[i, 2] + t / 2), tilt_deg=float(tilt[i]), support_inset_m=float(support[i]))
     rb.unfreeze()
     return {"move": mv, "place": o_b.get("place", {}), "surface_z": surf, "target_xy": tgt, "in_hold_flat": ok,
-            "pos_err_mm": np.linalg.norm(pb[:, :2] - tgt, axis=1) * 1000, "tilt_deg": tilt}
+            "pos_err_mm": np.linalg.norm(pb[:, :2] - tgt, axis=1) * 1000, "tilt_deg": tilt, "support_inset_m": support}
 SHELF_BOOKS_X: dict = {}  # 環境ごとの、棚に置いた本の x の範囲（深さカメラを描かない環境の空きを出すため）
 
 

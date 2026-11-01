@@ -1,6 +1,7 @@
 """保留棚に積んでも崩れないかの判定（hold.py。02_確認事項 B14）。"""
 
 import math
+from dataclasses import replace as dataclasses_replace
 
 import pytest
 
@@ -54,6 +55,13 @@ def test_small_top_book_leaves_too_little_support():
     p = plan_stack(TABLE_C, TABLE_S, TOP, top_book(size=(0.045, 0.30)), 0.012)
     assert not p.ok and p.reason == "center_of_mass_near_edge" and p.inset_m < 0.015
     assert plan_stack(TABLE_C, TABLE_S, TOP, top_book(size=(0.051, 0.30)), 0.012).ok
+
+
+def test_top_book_placed_near_the_edge_of_the_book_below_is_refused():
+    """置いた後に測って、いちばん上の本が下の本の縁の近くに載っていたら、次の本は積まない（山が階段のようにずれた）"""
+    p = plan_stack(TABLE_C, TABLE_S, TOP, dataclasses_replace(top_book(), support_inset_m=0.010), 0.012)
+    assert not p.ok and p.reason == "pile_unstable"
+    assert plan_stack(TABLE_C, TABLE_S, TOP, dataclasses_replace(top_book(), support_inset_m=0.020), 0.012).ok
 
 
 def test_pile_already_off_the_table_edge_is_refused():

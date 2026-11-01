@@ -9,6 +9,8 @@
      置く位置はいちばん上の本の中心（1 冊目は台の中心）。置く位置の誤差（place_err_m）だけずれても満たすこと
   3. いちばん上の本の傾きが max_tilt_deg 以下
   4. いちばん上の本の中心が、台の縁から min_inset_m 以上内側にある（山がもう台の縁へずれていない）
+  5. いちばん上の本が、置いた後に測って、下の本（1 冊目は台）の縁から min_inset_m 以上内側に載っている
+     （置く位置が見込みより大きくずれたら、次の本は積まない）
 """
 
 from __future__ import annotations
@@ -38,6 +40,9 @@ class TopBook:
     size_xy: tuple[float, float]  # 上から見た大きさ（本の座標の x・y。背の向き・天地の向き）
     top_z: float
     tilt_deg: float
+    # 置いた後に測った、この本の中心が下の本（1 冊目は台）の縁からどれだけ内側にあるか。置く位置がずれると、山が階段の
+    # ようにずれていく（20261101T033205-3697ce の book-05 は 65 mm ずれた）。None は測っていない
+    support_inset_m: float | None = None
 
 
 @dataclass(frozen=True)
@@ -68,6 +73,8 @@ def plan_stack(table_center, table_size, table_top: float, top: TopBook | None, 
             return StackPlan(False, "top_book_tilted", None, None, None)
         if inset_from_edge(top.center_xy, table_center, 0.0, table_size) < rule.min_inset_m:
             return StackPlan(False, "top_book_off_table", None, None, None)  # 下の山がもう台の縁へずれている
+        if top.support_inset_m is not None and top.support_inset_m < rule.min_inset_m:
+            return StackPlan(False, "pile_unstable", None, None, None)  # いちばん上の本が、下の本の縁の近くに載っている
         target, surface = (float(top.center_xy[0]), float(top.center_xy[1])), float(top.top_z)
         support = (top.center_xy, top.yaw, top.size_xy)
     if surface + new_thickness - table_top > rule.max_stack_m + 1e-9:
