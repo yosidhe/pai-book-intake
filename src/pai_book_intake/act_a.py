@@ -443,7 +443,7 @@ def run(args, out: Path) -> dict:
             world.monitors.remove(nudge)
         res = placed_ok(book, spec, site, slot_xy)
         lifted = rec.lift_max > 0.03
-        row = {"book_id": spec.book_id, "ctrl_steps": len(rec.A), "lifted": lifted, **res,
+        row = {"book_id": spec.book_id, "ctrl_steps": len(rec.A), "lifted": lifted, "init_bottom_z": init["bottom_z"], **res,
                **{k2: v for k2, v in info.items()}}
         if nudge is not None:
             row["nudge_moved_mm"] = nudge.moved_mm
