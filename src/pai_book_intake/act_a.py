@@ -319,6 +319,7 @@ def parse_args():
     e.add_argument("--nudge", type=float, default=0.0, metavar="MM",
                    help=f"取り出しを始めて {NUDGE_AFTER_S} s 後（手が本の上に着いたところ）に、本を水平に MM ずらす。"
                         "向きは種で決める（方策によらず同じ）")
+    e.add_argument("--first-slot-only", action="store_true", help="置き場所を 1 つ目だけにする（p2_line --a-policy act と同じ）")
     e.add_argument("--site", type=Path, default=DEFAULT_SITE)
     m = sub.add_parser("compare")
     m.add_argument("run_a", type=Path, help="act_eval か act_collect の run のフォルダ")
@@ -339,6 +340,8 @@ def compare(ra: dict, rb: dict) -> dict:
             raise ValueError(f"{k} が違う: {ra.get(k)} / {rb.get(k)}")
     if ra["args"]["seed"] != rb["args"]["seed"]:
         raise ValueError(f"seed が違う: {ra['args']['seed']} / {rb['args']['seed']}")
+    if bool(ra["args"].get("first_slot_only")) != bool(rb["args"].get("first_slot_only")):
+        raise ValueError("first_slot_only が違う")
     if (ra.get("nudge") or None) != (rb.get("nudge") or None):
         raise ValueError(f"nudge が違う: {ra.get('nudge')} / {rb.get('nudge')}")
     pa, pb = outcomes(ra), outcomes(rb)
@@ -348,6 +351,12 @@ def compare(ra: dict, rb: dict) -> dict:
             "only_a_failed": [list(c) for c in common if not pa[c] and pb[c]],
             "only_b_failed": [list(c) for c in common if pa[c] and not pb[c]],
             "both_failed": [list(c) for c in common if not pa[c] and not pb[c]]}
+
+
+def choose_slots(rng, slots: np.ndarray, n: int, first_only: bool = False) -> np.ndarray:
+    """環境ごとに置き場所を選ぶ（rng の使い方は方策と first_only によらず同じ）"""
+    idx = rng.integers(0, len(slots), n)
+    return slots[np.zeros(n, int) if first_only else idx]
 
 
 def main() -> None:
@@ -416,7 +425,7 @@ def run(args, out: Path) -> dict:
     for k in range(n_books):
         idx = len(pile) - 1 - k
         book, spec = books[idx], pile[idx]
-        slot_xy = slots[rng.integers(0, len(slots), n)]  # 環境ごとに置き場所を選ぶ（rng の使い方は方策によらず同じ）
+        slot_xy = choose_slots(rng, slots, n, first_only=getattr(args, "first_slot_only", False))
         init = initial(book, spec)
         rec = Recorder(r, book, spec, init, slot_xy)
         world.monitors.append(rec)

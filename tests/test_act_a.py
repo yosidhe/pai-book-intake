@@ -140,3 +140,15 @@ def test_act_uses_only_the_first_tray_slot():
     assert slots[0][0] == 0.25
     assert tray_slots_used("act", slots) == 1
     assert tray_slots_used("scripted", slots) == len(slots)
+
+
+def test_choose_slots_first_only_keeps_the_same_random_draws():
+    from pai_book_intake.act_a import choose_slots
+
+    slots = np.array([[0.25, 0.5], [0.56, 0.5]])
+    ra, rb = np.random.default_rng(3), np.random.default_rng(3)
+    both = choose_slots(ra, slots, 20)
+    first = choose_slots(rb, slots, 20, first_only=True)
+    assert {float(x) for x in both[:, 0]} == {0.25, 0.56}
+    assert np.allclose(first, slots[0])
+    assert ra.integers(0, 1000) == rb.integers(0, 1000)  # 次の本の乱数がずれない
