@@ -18,6 +18,11 @@
   4. 行き先が shelf か discard（査定が行き先を決められなかった本は運ばない）
   5. 行き先が本棚なら、本棚に空きがある（許可済みでまだ届いていない本の分も数える）。無ければ held（満杯）
 
+保留棚（02_確認事項 B14）: 査定できなかった本（held。理由が hold.HOLDABLE のどれか＝読めない・カタログに無い・
+本と ISBN が合わない）は、release_to_hold で保留棚（行き先 "hold"）へ運んでよいとする。本棚が満杯（shelf_full）の
+本には使えない。保留棚に積めないときは on_escalated(book_id, "hold_shelf_full") で台に残す（オブザーバが止める）。
+行き先 hold の許可は、あとから届く読み取りや査定の結果では取り消さない（_evaluate が触らない）。
+
 B は運ぶ直前に authorize(book_id, clearance_id) で確かめる。許可が無い・番号が違う・取り消されたときは
 pick.denied を出して、その本には触れない（take は例外を投げる）。
 """
@@ -29,12 +34,14 @@ from dataclasses import dataclass, field
 from .appraisal import Decision
 from .books import Catalog
 from .bus import Bus
+from .hold import HOLDABLE
 
 TASK = "appraisal"  # 運搬許可を出すのは査定台（査定の工程）
 SORTER = "robot-b-sort"
 
 PLACED, SCANNED, RELEASED, HELD, PICKED, DELIVERED = "placed", "scanned", "released", "held", "picked", "delivered"
 DESTINATIONS = ("shelf", "discard")
+HOLD = "hold"  # 保留棚（査定できなかった本。B14）
 # 待っても直らない理由（held にして人の判断を待つ）。それ以外（査定待ち・裏返し待ち・未読）は待てば進みうる
 HOLD_REASONS = ("shelf_full", "isbn_not_in_catalog", "isbn_mismatch", "appraisal_for_other_book")
 
@@ -56,6 +63,7 @@ class TrayItem:
     released_seq: int | None = None
     destination: str | None = None
     hold_reason: str | None = None
+    hold_cause: str | None = None  # 保留棚へ運ぶことにした理由（held だったときの hold_reason）
 
 
 @dataclass(frozen=True)
@@ -135,6 +143,25 @@ class ReleaseGate:
         it.decision = decision
         self._evaluate(it)
 
+    def holdable(self) -> list[TrayItem]:
+        """保留棚へ運べる本（held で、理由が HOLDABLE のどれか）を、置かれた順に返す。"""
+        return sorted((it for it in self.items.values() if it.state == HELD and it.hold_reason in HOLDABLE),
+                      key=lambda it: it.placed_seq)
+
+    def release_to_hold(self, book_id: str) -> TrayItem:
+        """査定できなかった本を、保留棚へ運んでよいとする（B が積めると確かめてから呼ぶ）。"""
+        it = self._get(book_id)
+        if it.state != HELD or it.hold_reason not in HOLDABLE:
+            raise ValueError(f"{book_id} は保留棚へ運べない（状態 {it.state}・理由 {it.hold_reason}）")
+        self._clearance += 1
+        self._seq += 1
+        it.hold_cause, it.hold_reason = it.hold_reason, None
+        it.state, it.clearance_id, it.released_seq, it.destination = RELEASED, self._clearance, self._seq, HOLD
+        self.bus.publish(TASK, SORTER, "event", "release",
+                         {"env": self.env, "book_id": it.book_id, "slot": it.slot, "clearance_id": it.clearance_id,
+                          "destination": HOLD, "value_jpy": 0, "reason": it.hold_cause})
+        return it
+
     # ---- B から ----
 
     def pickable(self) -> list[TrayItem]:
@@ -196,7 +223,7 @@ class ReleaseGate:
         return sum(1 for it in self.items.values() if it.destination == "shelf" and it.state in (RELEASED, PICKED))
 
     def _evaluate(self, it: TrayItem) -> None:
-        if it.state in (PICKED, DELIVERED, HELD):
+        if it.state in (PICKED, DELIVERED, HELD) or it.destination == HOLD:
             return
         reason = self._why_not(it)
         if reason is None:

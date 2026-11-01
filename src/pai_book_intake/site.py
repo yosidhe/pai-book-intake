@@ -76,6 +76,98 @@ class Site:
         return self.raw[key]
 
 
+# ---------- B の台車の道（02_確認事項 B15） ----------
+
+# 台車の床板（pinch.CHASSIS_XML と同じ。台車の中心から前へ +0.25・後ろへ -0.35、左右 ±0.24）
+CART_SIZE = (0.60, 0.48)
+CART_OFFSET = -0.05
+ROUTE_MARGIN = 0.10  # 台車の床板と障害物の間に空ける距離
+
+
+def rect_corners(center, size, yaw: float = 0.0, offset: float = 0.0) -> np.ndarray:
+    """長方形の 4 隅（4, 2）。offset は長方形の中心を自分の向き（yaw）の前へずらす量。"""
+    c, s = math.cos(yaw), math.sin(yaw)
+    hx, hy = size[0] / 2, size[1] / 2
+    local = np.array([[offset - hx, -hy], [offset + hx, -hy], [offset + hx, hy], [offset - hx, hy]])
+    rot = np.array([[c, -s], [s, c]])
+    return np.asarray(center, dtype=float)[:2] + local @ rot.T
+
+
+def cart_corners(pose) -> np.ndarray:
+    return rect_corners(pose[:2], CART_SIZE, float(pose[2]), CART_OFFSET)
+
+
+def _seg_point_dist(p, a, b) -> float:
+    ab = b - a
+    t = np.clip(np.dot(p - a, ab) / max(np.dot(ab, ab), 1e-12), 0.0, 1.0)
+    return float(np.linalg.norm(p - (a + t * ab)))
+
+
+def _overlap(P: np.ndarray, Q: np.ndarray) -> bool:
+    """凸多角形どうしが重なるか（分離軸）。"""
+    for poly in (P, Q):
+        for k in range(len(poly)):
+            e = poly[(k + 1) % len(poly)] - poly[k]
+            ax = np.array([-e[1], e[0]])
+            a, b = P @ ax, Q @ ax
+            if a.max() < b.min() or b.max() < a.min():
+                return False
+    return True
+
+
+def polygon_distance(P: np.ndarray, Q: np.ndarray) -> float:
+    """凸多角形どうしの距離。重なれば 0。"""
+    if _overlap(P, Q):
+        return 0.0
+    d = min(_seg_point_dist(p, Q[k], Q[(k + 1) % len(Q)]) for p in P for k in range(len(Q)))
+    return min(d, min(_seg_point_dist(q, P[k], P[(k + 1) % len(P)]) for q in Q for k in range(len(P))))
+
+
+def obstacle_rects(site: "Site") -> dict[str, np.ndarray]:
+    """B の台車が近づいてはいけない物の外形（上から見た 4 隅）。廃棄箱は壁の外側まで"""
+    raw = site.raw
+    tb, bn = raw["appraisal_table"], raw["bin"]
+    out = {"appraisal_table": rect_corners(tb["center"], tb["size"]),
+           "bin": rect_corners(bn["center"], [v + 2 * bn["wall_t"] for v in bn["inner"]])}
+    if "hold_table" in raw:
+        ht = raw["hold_table"]
+        out["hold_table"] = rect_corners(ht["center"], ht["size"])
+    return out
+
+
+def b_route(robot_b: dict, start, goal) -> list[tuple[float, float, float]]:
+    """B の台車が start から goal へ行く道（中継点の列。どれも (x, y, 向き)）。
+    待機位置の手前の点（station_approach）まで start の向きのまま進み、そこで向きを変えてから goal へ向かう。
+    待機位置から本棚へ向きを変えながらまっすぐ進むと、腕の台座（link0）が廃棄箱に当たった（20261101T003116-6d04d8。B15）"""
+    ap = robot_b.get("station_approach")
+    start, goal = tuple(float(v) for v in start), tuple(float(v) for v in goal)
+    if ap is None:
+        return [start, goal]
+    return [start, (float(ap[0]), float(ap[1]), start[2]), (float(ap[0]), float(ap[1]), goal[2]), goal]
+
+
+def _wrap(a: float) -> float:
+    return (a + math.pi) % (2 * math.pi) - math.pi
+
+
+def route_clearance(route, obstacles: dict[str, np.ndarray], step_m: float = 0.01, step_rad: float = 0.02) -> dict:
+    """道（中継点の列）を、台車の動き（g_drive と同じく x・y・向きを同時に補間）どおりに細かくたどり、
+    障害物ごとに台車の床板との最も近い距離を返す。{name: (距離, その時の姿勢)}"""
+    best = {k: (math.inf, None) for k in obstacles}
+    for a, b in zip(route[:-1], route[1:]):
+        dyaw = _wrap(b[2] - a[2])
+        n = max(1, int(math.ceil(max(math.hypot(b[0] - a[0], b[1] - a[1]) / step_m, abs(dyaw) / step_rad))))
+        for k in range(n + 1):
+            u = k / n
+            pose = (a[0] + (b[0] - a[0]) * u, a[1] + (b[1] - a[1]) * u, a[2] + dyaw * u)
+            P = cart_corners(pose)
+            for name, Q in obstacles.items():
+                d = polygon_distance(P, Q)
+                if d < best[name][0]:
+                    best[name] = (d, pose)
+    return best
+
+
 def load_site(path: Path = DEFAULT_SITE) -> Site:
     raw = json.loads(Path(path).read_text(encoding="utf-8"))
     if raw.get("schema") != "pai-book-intake/site@1":

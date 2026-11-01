@@ -4,7 +4,9 @@
   - 本の処理の失敗（rejected / failed）が max_consecutive_failures 回続いた
   - 本棚が満杯になった（棚に置いた冊数 ≥ shelf_capacity）。または、運搬許可が本棚に空きがないとして本を台に残した
     （tray.held の reason = shelf_full）
-  - バーコードが barcode_unreadable_limit 回続けて読めなかった（カメラや照明の故障を疑う）
+  - バーコードが barcode_unreadable_limit 回続けて読めなかった（カメラや照明の故障を疑う）。None なら止めない
+    （保留棚があるとき。読めない本は保留棚へ移すので、保留棚に置けなくなるまでは止めない。02_確認事項 B14）
+  - 保留棚に積めない（tray.held の reason = hold_shelf_full）
 止めるときは stop（type=event, 宛先 "*"）を 1 回だけ出す。
 
 並列の環境（env）はそれぞれ別の箱として扱う。メッセージの payload の "env"（無ければ 0）で振り分ける。
@@ -27,12 +29,12 @@ TRAY_STATE = {"tray.held": "held", "release": "released", "release.revoked": "wa
 @dataclass(frozen=True)
 class ObserverConfig:
     max_consecutive_failures: int = 3
-    barcode_unreadable_limit: int = 3
+    barcode_unreadable_limit: int | None = 3
     shelf_capacity: int = 3
 
     def __post_init__(self) -> None:
         for k in ("max_consecutive_failures", "barcode_unreadable_limit", "shelf_capacity"):
-            if getattr(self, k) < 1:
+            if getattr(self, k) is not None and getattr(self, k) < 1:
                 raise ValueError(f"{k} は 1 以上")
 
 
@@ -41,6 +43,7 @@ class BoxState:
     books: list = field(default_factory=list)
     shelf: list = field(default_factory=list)
     discard: list = field(default_factory=list)
+    hold: list = field(default_factory=list)  # 保留棚へ移した本
     consecutive_failures: int = 0
     consecutive_unreadable: int = 0
     barcode_reads: int = 0
@@ -79,7 +82,8 @@ class Observer:
             else:
                 st.barcode_unreadable += 1
                 st.consecutive_unreadable += 1
-                if st.consecutive_unreadable >= self.config.barcode_unreadable_limit:
+                lim = self.config.barcode_unreadable_limit
+                if lim is not None and st.consecutive_unreadable >= lim:
                     self._stop(env, "barcode_unreadable", {"consecutive": st.consecutive_unreadable})
         elif msg.topic == "book.result":
             self._on_book_result(env, st, msg.payload)
@@ -89,6 +93,9 @@ class Observer:
             if msg.topic == "tray.held" and p.get("reason") == "shelf_full":
                 # 本棚に空きがない。人が本棚を空けるか別の棚を割り当てるまで、この箱は進めない
                 self._stop(env, "shelf_full", {"book_id": p["book_id"], "held_on_tray": True})
+            elif msg.topic == "tray.held" and p.get("reason") == "hold_shelf_full":
+                # 保留棚に積めない（崩れるおそれ・高さの上限）。人が保留棚を空けるまで、この箱は進めない
+                self._stop(env, "hold_shelf_full", {"book_id": p["book_id"], "held_on_tray": True})
         elif msg.topic == "tray.picked":
             st.on_tray.pop(msg.payload["book_id"], None)
         elif msg.topic == "pick.denied":
@@ -105,6 +112,8 @@ class Observer:
                 st.shelf.append(dict(p))
             elif p.get("destination") == "discard":
                 st.discard.append(dict(p))
+            elif p.get("destination") == "hold":
+                st.hold.append(dict(p))
         else:
             st.consecutive_failures += 1
         if st.consecutive_failures >= self.config.max_consecutive_failures:
@@ -143,6 +152,10 @@ class Observer:
             "## 廃棄箱",
             "",
             *self._book_table(st.discard),
+            "",
+            "## 保留棚（査定できなかった本。人が判断する）",
+            "",
+            *self._book_table(st.hold, with_reason=True),
             "",
             "## 不合格・異常",
             "",

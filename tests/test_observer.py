@@ -126,3 +126,28 @@ def test_book_held_for_no_shelf_space_stops_the_box(tmp_path):
                                                                 "reason": "shelf_full"})
     assert obs.is_stopped(0) and obs.box(0).stop_reason == "shelf_full"
     assert stops(bus)[0].payload["book_id"] == "b2"
+
+
+def test_with_a_hold_table_unreadable_books_do_not_stop_the_box(tmp_path):
+    """保留棚があるとき（barcode_unreadable_limit=None）は、読めない本が続いても止めない（B14）。
+    保留棚に積めない（hold_shelf_full）で本を台に残したら、箱ごと止める"""
+    bus, obs = setup(tmp_path, barcode_unreadable_limit=None, shelf_capacity=20)
+    for k in range(5):
+        barcode(bus, False)
+        result(bus, "succeeded", dest="hold", book=f"b{k}", reason="barcode_unreadable")
+    assert not obs.is_stopped(0)
+    assert [b["book_id"] for b in obs.box(0).hold] == [f"b{k}" for k in range(5)]
+    bus.publish("appraisal", "observer", "event", "tray.held", {"env": 0, "book_id": "b5", "slot": 0,
+                                                                "reason": "hold_shelf_full"})
+    assert obs.is_stopped(0) and obs.box(0).stop_reason == "hold_shelf_full"
+    assert stops(bus)[0].payload["book_id"] == "b5"
+    md = obs.report_markdown(0)
+    assert "## 保留棚" in md and "| b0 |" in md and "barcode_unreadable" in md
+
+
+def test_without_a_hold_table_unreadable_books_still_stop_the_box(tmp_path):
+    bus, obs = setup(tmp_path, barcode_unreadable_limit=2)
+    barcode(bus, False)
+    assert not obs.is_stopped(0)
+    barcode(bus, False)
+    assert obs.is_stopped(0) and obs.box(0).stop_reason == "barcode_unreadable"

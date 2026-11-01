@@ -228,3 +228,79 @@ def test_place_at_the_slot_a_chose(tmp_path):
     assert g.free_slot() == 0  # 次の本は、book-10 の上ではなく空いた方へ
     with pytest.raises(RuntimeError, match="ふさがって"):
         g.place("book-04", slot=1)
+
+
+# ---------- 保留棚（02_確認事項 B14） ----------
+
+def unreadable(g: ReleaseGate, book_id: str = "book-03") -> None:
+    g.place(book_id)
+    g.on_scan(book_id, None)
+    g.on_escalated(book_id, "barcode_unreadable")
+
+
+def test_unreadable_book_can_be_sent_to_the_hold_table(tmp_path):
+    """読めない本（held）は release_to_hold で保留棚行きの許可が出て、B が持っていける。届いたら delivered"""
+    bus, g = make(tmp_path)
+    unreadable(g)
+    assert [it.book_id for it in g.holdable()] == ["book-03"]
+    assert g.pickable() == []  # 保留棚へ送ると決めるまでは持っていけない
+    it = g.release_to_hold("book-03")
+    assert it.state == RELEASED and it.destination == "hold" and it.hold_cause == "barcode_unreadable"
+    assert g.holdable() == []
+    assert g.take("book-03", it.clearance_id) == "hold"
+    g.on_delivered("book-03", True)
+    assert g.items["book-03"].state == DELIVERED and g.shelf_used == 0
+    assert g.free_slot() == 0  # 台の置き場所が空く
+    rel = [m for m in read_log(tmp_path / "bus.jsonl") if m["topic"] == "release"]
+    assert rel[-1]["payload"]["destination"] == "hold" and rel[-1]["payload"]["reason"] == "barcode_unreadable"
+
+
+@pytest.mark.parametrize("reason", ["isbn_not_in_catalog", "isbn_mismatch"])
+def test_unknown_or_mismatched_isbn_goes_to_the_hold_table(tmp_path, reason):
+    bus, g = make(tmp_path)
+    g.place("book-03")
+    g.on_scan("book-03", "9784000000017" if reason == "isbn_not_in_catalog" else isbn("book-05"))
+    assert g.items["book-03"].state == HELD and g.items["book-03"].hold_reason == reason
+    assert g.release_to_hold("book-03").destination == "hold"
+
+
+def test_hold_release_is_not_revoked_by_later_scan_or_appraisal(tmp_path):
+    """保留棚行きの許可は、あとから届く読み取りや査定の結果で取り消さない"""
+    bus, g = make(tmp_path)
+    unreadable(g)
+    it = g.release_to_hold("book-03")
+    g.on_scan("book-03", None)
+    g.on_appraisal("book-03", None)
+    assert it.state == RELEASED and it.destination == "hold"
+    assert g.authorize("book-03", it.clearance_id).ok
+
+
+def test_shelf_full_book_is_not_sent_to_the_hold_table(tmp_path):
+    """本棚が満杯で台に残した本（shelf_full）は、保留棚に載せない（B14-3）"""
+    bus, g = make(tmp_path, shelf_capacity=0)
+    ready(g, "book-03")
+    assert g.items["book-03"].hold_reason == "shelf_full"
+    assert g.holdable() == []
+    with pytest.raises(ValueError):
+        g.release_to_hold("book-03")
+
+
+def test_book_that_cannot_be_stacked_stays_on_the_tray(tmp_path):
+    """保留棚に積めないときは hold_shelf_full で台に残す。もう保留棚へは送れない"""
+    bus, g = make(tmp_path)
+    unreadable(g)
+    g.on_escalated("book-03", "hold_shelf_full")
+    it = g.items["book-03"]
+    assert it.state == HELD and it.hold_reason == "hold_shelf_full"
+    assert g.holdable() == [] and g.remaining() == [it]
+    with pytest.raises(ValueError):
+        g.release_to_hold("book-03")
+
+
+def test_hold_delivery_failure_leaves_the_book_held(tmp_path):
+    bus, g = make(tmp_path)
+    unreadable(g)
+    it = g.release_to_hold("book-03")
+    g.take("book-03", it.clearance_id)
+    g.on_delivered("book-03", False)
+    assert it.state == HELD and it.hold_reason == "delivery_failed"

@@ -13,9 +13,10 @@
 | ロボット A（固定） | 箱の平積みの一番上の本を取り、査定台に置く。手は「背をゴムで挟んで数 mm 浮かせ、すき間に爪を入れ、上から板で押さえる」形 | `pinch.py`・`hand_design.py` |
 | 査定台とカメラ | 真上のカメラで本のバーコードを読む（zxing-cpp） | `vision.py`・`inspection.py` |
 | 査定 | ISBN → カタログ（10 冊）→ 本棚か廃棄か。ルールで決める（LLM は使わない） | `appraisal.py`・`release.py` |
-| ロボット B と台車 | 運んでよい本を取り、廃棄箱へ平らに置く。本棚なら台車で移動し、深さカメラで空きを見て置き、記録する | `p2_line.py`・`inventory.py` |
+| ロボット B と台車 | 運んでよい本を取り、廃棄箱へ平らに置く。本棚なら台車で移動し、深さカメラで空きを見て置き、記録する。査定できなかった本（読めない・カタログに無い・本と ISBN が合わない）は保留棚へ積む（崩れるおそれがあれば積まずに止める） | `p2_line.py`・`hold.py`・`inventory.py` |
+| 配置 | 箱・査定台・廃棄箱・保留棚・本棚の位置。台車の道が障害物に近づきすぎないかを確かめる | `site.py`・`assets/site/site_v1.json` |
 | 本棚 | 指で 1 冊ずつ支える棚（ブックキーパー）を横に長くしたもの。締切版は平らに積む | `keeper.py` |
-| オブザーバ | 全部のメッセージを見る。止める条件（バーコードが続けて読めない・続けて失敗・本棚が満杯）と箱ごとの報告書 | `observer.py`・`bus.py` |
+| オブザーバ | 全部のメッセージを見る。止める条件（続けて失敗・本棚が満杯・保留棚に積めない。保留棚が無い配置ではバーコードが続けて読めない）と箱ごとの報告書 | `observer.py`・`bus.py` |
 | A の方策の学習 | スクリプトの動きをデモにして、LeRobot の ACT（模倣学習）で A の取り出しを学習する。観測は状態だけ（画像なし） | `act_a.py`・`act_train.py` |
 | 改善の材料 | 実行の記録を数えて、LLM に「次に直すこと」「次に学習させる場面」を頼むための材料を作る | `improve.py` |
 
@@ -34,9 +35,9 @@ docker compose run --rm sim python -m pai_book_intake.p2_line --n-envs 1 --books
 docker compose run --rm sim python -m pai_book_intake.p2_line --n-envs 1 --books 10 --face-down book-06 --video \
     --pile book-10,book-09,book-08,book-07,book-01,book-04,book-03,book-05,book-06,book-02
 
-# わざと失敗させる: 2 冊目から点検カメラの画像を汚す → 修正依頼 → 人の判断待ち → オブザーバが箱ごと止める
-docker compose run --rm sim python -m pai_book_intake.p2_line --n-envs 1 --books 5 --inject-camera-dirty-from 1 --video \
-    --pile book-09,book-04,book-10,book-03,book-02
+# わざと失敗させる: 2 冊目から点検カメラの画像を汚す → 修正依頼 → 保留棚へ → 保留棚に積めなくなったら、オブザーバが箱ごと止める
+docker compose run --rm sim python -m pai_book_intake.p2_line --n-envs 1 --books 10 --inject-camera-dirty-from 1 --video \
+    --pile book-10,book-09,book-08,book-07,book-01,book-04,book-03,book-05,book-06,book-02
 
 # ACT: デモを集める → 学習 → スクリプト版と同じ条件で評価
 docker compose run --rm sim python -m pai_book_intake.act_a collect --n-envs 32 --seed 1 --books 10
@@ -53,7 +54,8 @@ docker compose run --rm sim python -m pai_book_intake.improve --runs /workspace/
 ## 判定
 
 - 各 run の `result.json` の `status` は `succeeded`（受入の条件を満たした）・`rejected`（最後まで動いたが満たさなかった）・`failed`（例外）の 3 つ
-- 工程ごとの成功率（取り出し・読取・査定・運搬・空き認識・棚に置く・廃棄）と全体は `stage_rates_env0` に出る
+- 工程ごとの成功率（取り出し・読取・査定・運搬・空き認識・棚に置く・廃棄・保留棚）と全体は `stage_rates_env0` に出る
+- ロボット B（台車と腕）が廃棄箱・保留棚・査定台に触れた歩数は `b_contacts` に出る。0 回でなければ `rejected`
 
 ## 制約
 

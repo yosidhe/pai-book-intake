@@ -23,8 +23,17 @@ A と B は並行して動く（既定。2026-10-28 ユーザーの要件）
   - 査定台の上に手を入れるのは一度に 1 台だけ（zone["table"]）。もう 1 台は台の手前で待つ
   - --sequential で、前の「1 冊ずつ A → B」に戻せる（比べるため）
 
+保留棚（02_確認事項 B14。配置データに hold_table があるとき）
+  - 査定できなかった本（読めない・カタログに無い・本と ISBN が合わない）は、B が保留棚へ平らに積む（廃棄箱と同じ置き方）
+  - 積むと崩れるおそれがあれば（hold.py）、取らずに台に残し（hold_shelf_full）、オブザーバが箱ごと止める
+  - 本棚が満杯で置けない本（shelf_full）は保留棚に載せない（台に残して止める）
+  - 読めない本が続いても、保留棚に置けなくなるまでは止めない
+
+B の台車は、本棚へ行くときも戻るときも station_approach を通り、向きはそこで変える（B15。site.b_route）。
+B（台車と腕）が廃棄箱・保留棚・査定台に触れた歩数を毎歩数え（ContactCounter）、0 回を合格の条件にする
+
 まだ入っていないもの（結果の not_implemented に書く）
-  - 裏返し（B3: 空中で回す）。バーコードが見えない本は、人の判断待ち（tray.held）として台に残す
+  - 裏返し（B3: 空中で回す）。バーコードが見えない本は、保留棚へ移す（保留棚が無ければ人の判断待ちとして台に残す）
   - 箱の中の縦置きの本（B2）。今の箱は平積みだけ
 
 描画は環境 0 だけ（WSL2 の Docker は CPU 描画）。環境 0 以外は、バーコードは本の向き（表紙が上か）から、本棚の空きは
@@ -53,6 +62,7 @@ from .books import DEFAULT_CATALOG, SURFACES, load_catalog
 from .bus import Bus
 from .geometry import quat_to_mat, quat_z
 from .hand_design import ENV_BIT, PinchHand
+from .hold import FULL_REASON, HOLDABLE, StackRule, TopBook, plan_stack
 from .inventory import Inventory, Placement
 from .keeper import (BASE_T, KeeperSpec, choose_flat_slot, choose_slot, choose_stack, flat_book_center_y, free_spans,
                      keeper_mjcf, occupancy_from_points, spans_from_books)
@@ -60,9 +70,9 @@ from .observer import Observer, ObserverConfig
 from .pinch import (PinchRobot, book_frame, build_pinch_robot_xml, g_cart_chain, g_drive, g_home, g_move_book,
                     g_joints, g_move_book_joint, g_pick, g_place_flat, g_shelve, lip_side_quat, min_jerk, run_generators,
                     shelve_grip_offset, standing_quat, touching)
-from .release import ReleaseGate
+from .release import HELD, HOLD, ReleaseGate
 from .runlog import classify, new_run, save_result
-from .site import DEFAULT_SITE, load_site
+from .site import DEFAULT_SITE, b_route, load_site
 from .tool import World
 from .vision import decode_isbn
 
@@ -105,6 +115,9 @@ def parse_args():
     ap.add_argument("--shelf-capacity", type=int, default=20,
                     help="この箱に割り当てた本棚の冊数。超える本は台に残し（shelf_full）、オブザーバが箱ごと止める。"
                          "「本棚に空きがない」を起こすため（02_確認事項 B9）")
+    ap.add_argument("--hold-max-stack-m", type=float, default=None,
+                    help="保留棚に積む高さの上限（台の上面から。省略時は配置データの max_stack_m）。"
+                         "「保留棚に積めない」を起こすため（02_確認事項 B14）")
     ap.add_argument("--sequential", action="store_true",
                     help="A と B を並行させず、1 冊ずつ A → B の順に処理する（前の動き。比べるため）")
     return ap.parse_args()
@@ -119,7 +132,10 @@ def main() -> None:
     bus = Bus(run_id, out / "bus.jsonl")
     # 読めない本は人の判断待ちとして査定台に残る。台の置き場所は 2 つなので、3 冊続けて読めないまで待つと、3 冊目を置く前に
     # 台が埋まり、止まらずに待ち続けた（2026-10-28）。置き場所の数だけ続けて読めなければ、カメラの故障を疑って止める
-    observer = Observer(bus, ObserverConfig(max_consecutive_failures=3, barcode_unreadable_limit=2, shelf_capacity=20))
+    # 保留棚があれば、読めない本は保留棚へ移すので、読めない本が続いても止めない（止めるのは保留棚に積めないとき。B14）
+    hold_on = "hold_table" in load_site(args.site).raw
+    observer = Observer(bus, ObserverConfig(max_consecutive_failures=3, barcode_unreadable_limit=None if hold_on else 2,
+                                            shelf_capacity=20))
     ctx: dict = {"recording": []}
     result: dict = {}
     error = None
@@ -155,12 +171,13 @@ def _open_box(scene, center, inner, floor, wall_h, wall_t, color):
     """上が開いた箱。floor は床板の上面の高さ。"""
     cx, cy = center
     ix, iy = inner
-    _box(scene, (ix + 2 * wall_t, iy + 2 * wall_t, floor), (cx, cy, floor / 2), color)
+    ents = [_box(scene, (ix + 2 * wall_t, iy + 2 * wall_t, floor), (cx, cy, floor / 2), color)]
     for size, off in [((wall_t, iy + 2 * wall_t, wall_h), (-ix / 2 - wall_t / 2, 0)),
                       ((wall_t, iy + 2 * wall_t, wall_h), (ix / 2 + wall_t / 2, 0)),
                       ((ix, wall_t, wall_h), (0, -iy / 2 - wall_t / 2)),
                       ((ix, wall_t, wall_h), (0, iy / 2 + wall_t / 2))]:
-        _box(scene, size, (cx + off[0], cy + off[1], wall_h / 2), color)
+        ents.append(_box(scene, size, (cx + off[0], cy + off[1], wall_h / 2), color))
+    return ents
 
 
 def build(args, out: Path, site, pile_specs):
@@ -176,9 +193,13 @@ def build(args, out: Path, site, pile_specs):
     bx = site["box"]
     _open_box(scene, bx["center"], bx["inner"], bx["floor"], bx["wall_h"], bx["wall_t"], CARD)
     tb = site["appraisal_table"]
-    _box(scene, (*tb["size"], tb["top"]), (*tb["center"], tb["top"] / 2), GRAY)
+    # B が触れてはいけない物（02_確認事項 B15。ContactCounter で毎歩数える）
+    obstacles = {"appraisal_table": [_box(scene, (*tb["size"], tb["top"]), (*tb["center"], tb["top"] / 2), GRAY)]}
     bn = site["bin"]
-    _open_box(scene, bn["center"], bn["inner"], bn["floor"], bn["wall_h"], bn["wall_t"], BIN_COLOR)
+    obstacles["bin"] = _open_box(scene, bn["center"], bn["inner"], bn["floor"], bn["wall_h"], bn["wall_t"], BIN_COLOR)
+    if "hold_table" in site.raw:
+        ht = site["hold_table"]
+        obstacles["hold_table"] = [_box(scene, (*ht["size"], ht["top"]), (*ht["center"], ht["top"] / 2), GRAY)]
     shelf = site.shelf()
     keeper = KeeperSpec(width=shelf.width, depth=shelf.depth, n_fingers=shelf.n_fingers, pitch=shelf.pitch)
     stand_c = shelf.to_world([shelf.width / 2, shelf.depth / 2, 0.0])
@@ -225,7 +246,115 @@ def build(args, out: Path, site, pile_specs):
     rob_b.setup()
     keeper_ent.set_dofs_position(np.full((args.n_envs, keeper.n_fingers), math.radians(-35.0)),
                                  np.arange(keeper.n_fingers))
-    return scene, world, rob_a, rob_b, books, keeper_ent, keeper, cams
+    return scene, world, rob_a, rob_b, books, keeper_ent, keeper, cams, obstacles
+
+
+# 手が、本を取る面・置く面に触れるのは、この手の動き方そのもの（爪を本と面のすき間に入れる・面まで下ろして放す）なので
+# 接触に数えず、別に数える（hand_on_surface）。工程（phase）・障害物の部品・B の部品の 3 つが全部合うときだけ。
+# 直す前の実行（20261101T003116-6d04d8）では、査定台で取るときの爪と指 11 回・廃棄箱の床に置くときの爪 5 回がこれだった
+SURFACE_PHASES = {"appraisal_table": ("b_pick",), "bin": ("bin_place",), "hold_table": ("hold_place",)}
+
+
+class ContactCounter:
+    """B（台車と腕）が障害物（廃棄箱・保留棚・査定台）に触れている歩数を毎歩数える（02_確認事項 B15）。
+    B の geom が片側にある接触だけを見るので、本と箱の接触（廃棄箱に入れた本など）は数えない。
+    手が取る面・置く面に触れるのは SURFACE_PHASES のとおり別に数える（廃棄箱は床だけ。壁は数える）。
+    触れ始めた所ごとに、そのときの工程（phase）・B の部品・シミュの中の時刻と長さを残す（どこで当たったかを探すため）"""
+
+    def __init__(self, robot, obstacles: dict, world):
+        import torch
+
+        self.e, self.world, self.n, self.robot = robot.e, world, world.n, robot
+        self.links = robot.e._solver.links
+        self.names = sorted(obstacles)
+        self.ranges = {k: [(int(o.geom_start), int(o.geom_end)) for o in v] for k, v in obstacles.items()}
+        # 置き面: 査定台と保留棚は全部、廃棄箱は床（_open_box の最初の物体）だけ
+        self.surface = {k: self.ranges[k][:1] if k == "bin" else self.ranges[k] for k in self.names}
+        arm = {"base"} | {f"link{j}" for j in range(8)}
+        hand = [int(lk.idx) for lk in robot.e.links if lk.name not in arm]
+        self.hand_names = sorted(lk.name for lk in robot.e.links if lk.name not in arm)
+        self.is_hand = torch.zeros(len(self.links), dtype=torch.bool)
+        self.is_hand[hand] = True
+        self.phase = "start"
+        self.steps = {k: np.zeros(self.n, int) for k in self.names}
+        self.surface_steps = {k: np.zeros(self.n, int) for k in self.names}
+        self.prev = {k: np.zeros(self.n, bool) for k in self.names}
+        self.open: dict = {}
+        self.episodes: list[dict] = []
+
+    def _in(self, other, ranges):
+        import torch
+
+        m = torch.zeros_like(other, dtype=torch.bool)
+        for lo, hi in ranges:
+            m |= (other >= lo) & (other < hi)
+        return m
+
+    def __call__(self) -> None:
+        import torch
+
+        ci = self.e.get_contacts()
+        ga, gb, vm, la, lb = ci["geom_a"], ci["geom_b"], ci["valid_mask"], ci["link_a"], ci["link_b"]
+        if ga.ndim == 1:
+            ga, gb, vm, la, lb = ga[None], gb[None], vm[None], la[None], lb[None]
+        hit = np.zeros((len(self.names), self.n), bool)
+        surf = np.zeros((len(self.names), self.n), bool)
+        hits = [None] * len(self.names)
+        if ga.shape[-1] > 0:
+            mine_a = (ga >= self.e.geom_start) & (ga < self.e.geom_end)
+            other = torch.where(mine_a, gb, ga)
+            own_link = torch.where(mine_a, la, lb)
+            hand = self.is_hand.to(own_link.device)[own_link.long()]
+            for j, k in enumerate(self.names):
+                m = self._in(other, self.ranges[k]) & vm
+                if self.phase in SURFACE_PHASES[k]:
+                    s = m & hand & self._in(other, self.surface[k])
+                    surf[j] = s.any(dim=1).cpu().numpy()
+                    m = m & ~s
+                hits[j] = m
+                hit[j] = m.any(dim=1).cpu().numpy()
+        t = round(self.world.sim_time, 2)
+        for j, k in enumerate(self.names):
+            self.steps[k] += hit[j]
+            self.surface_steps[k] += surf[j]
+            for i in np.nonzero(hit[j] & ~self.prev[k])[0]:
+                sel = hits[j][int(i)]
+                own = own_link[int(i)][sel].cpu().numpy().tolist()
+                oth = other[int(i)][sel].cpu().numpy().tolist()
+                parts = sorted({p for g in oth for p, (lo, hi) in enumerate(self.ranges[k]) if lo <= g < hi})
+                pos = ci["position"][int(i)][sel] if ci["position"].ndim == 3 else ci["position"][sel]
+                ep = {"env": int(i), "obstacle": k, "phase": self.phase, "sim_time": t,
+                      "b_links": sorted({self.links[x].name for x in own}),
+                      "obstacle_parts": parts,  # 廃棄箱は 0 = 床・1〜4 = 壁（-x・+x・-y・+y）
+                      "position": [round(float(v), 3) for v in pos[0].cpu().numpy()],
+                      "gripper": [round(float(v), 3) for v in self.robot.gripper.get_pos().cpu().numpy()[int(i)]],
+                      "steps": 0}
+                self.episodes.append(ep)
+                self.open[(k, int(i))] = ep
+            for i in np.nonzero(hit[j])[0]:
+                self.open[(k, int(i))]["steps"] += 1
+            self.prev[k] = hit[j]
+
+    def summary(self) -> dict:
+        per_env = [int(sum(self.steps[k][i] for k in self.names)) for i in range(self.n)]
+        by_phase: dict = {}
+        for ep in self.episodes:
+            key = f"{ep['obstacle']}@{ep['phase']}"
+            by_phase[key] = by_phase.get(key, 0) + 1
+        return {"steps_in_contact": {k: v.tolist() for k, v in self.steps.items()}, "total_steps_per_env": per_env,
+                "episodes_by_obstacle_phase": by_phase, "episodes": self.episodes,
+                "hand_on_surface_steps": {k: v.tolist() for k, v in self.surface_steps.items()},
+                "hand_links": self.hand_names, "surface_phases": SURFACE_PHASES,
+                "note": "B（台車と腕）の geom と障害物の接触。本と箱の接触は数えない。手が取る面・置く面に触れた歩数は"
+                        " hand_on_surface_steps に別に数える（合格の条件には入れない）"}
+
+
+CONTACTS: list = []  # 今の ContactCounter（工程の名前を書き込むため。無ければ何もしない）
+
+
+def _phase(name: str) -> None:
+    if CONTACTS:
+        CONTACTS[0].phase = name
 
 
 def dirty_lens(rgb: np.ndarray) -> np.ndarray:
@@ -239,7 +368,8 @@ def dirty_lens(rgb: np.ndarray) -> np.ndarray:
 
 def stage_rates(per_book: list[dict], catalog) -> dict:
     """環境 0 の工程ごとの成功率（02_確認事項 B10）。分母はその工程まで来た本。"""
-    st = {k: [0, 0] for k in ("pick", "barcode", "appraisal", "transport", "free_space", "shelve", "discard", "overall")}
+    st = {k: [0, 0] for k in ("pick", "barcode", "appraisal", "transport", "free_space", "shelve", "discard", "hold",
+                              "overall")}
 
     def add(k, ok):
         st[k][0] += int(bool(ok))
@@ -254,6 +384,11 @@ def stage_rates(per_book: list[dict], catalog) -> dict:
             continue
         isbn = r["isbn_read"][0]
         add("barcode", isbn is not None)
+        if (r.get("destination") or [None])[0] == HOLD:  # 査定できなかった本（保留棚へ。B14）
+            add("transport", (r.get("b_pick") or {}).get("lifted", [False])[0])
+            if "hold" in r:
+                add("hold", r["hold"]["in_hold_flat"][0])
+            continue
         if isbn is None:
             continue
         b = catalog.by_id(r["book_id"])
@@ -307,8 +442,11 @@ def run(args, run_id: str, out: Path, bus: Bus, obs: Observer, ctx: dict) -> dic
     rng = np.random.default_rng(args.seed)
     gs.init(backend=gs.gpu, seed=args.seed, logging_level="warning")
     t_build = time.time()
-    scene, world, ra, rb, books, keeper_ent, keeper, cams = build(args, out, site, pile)
+    scene, world, ra, rb, books, keeper_ent, keeper, cams, obstacles = build(args, out, site, pile)
     build_s = time.time() - t_build
+    contacts = ContactCounter(rb, obstacles, world)
+    CONTACTS[:] = [contacts]
+    world.monitors.append(contacts)
     bus.set_sim_clock(lambda: world.sim_time)
     stack_books(books, pile, site, n, rng)
     for b, spec in zip(books, pile):
@@ -333,6 +471,10 @@ def run(args, run_id: str, out: Path, bus: Bus, obs: Observer, ctx: dict) -> dic
         if name in cams:
             cams[name].start_recording(save_to_filename=str(out / f"{name}_env0.mp4"), fps=25)
             ctx["recording"].append(cams[name])
+    ht = site.raw.get("hold_table")
+    if ht is not None:
+        HOLD_RULE[:] = [StackRule(max_stack_m=args.hold_max_stack_m if args.hold_max_stack_m is not None
+                                  else float(ht.get("max_stack_m", 0.12)))]
     t0 = time.time()
     per_book = []
     stopped_at = None
@@ -375,12 +517,14 @@ def run(args, run_id: str, out: Path, bus: Bus, obs: Observer, ctx: dict) -> dic
     shelved_ok = [sum(1 for r in shelf_rows if r["env"] == i and r["inside"] and (r["upright"] if r["pose"] == "standing"
                                                                                  else r["spine_front"] and r["tilt_deg"] < 10.0))
                   for i in range(n)]
-    acceptance_ok = all(n_ok[i] == expected[i] for i in range(n))
+    contact = contacts.summary()
+    acceptance_ok = all(n_ok[i] == expected[i] for i in range(n)) and all(c == 0 for c in contact["total_steps_per_env"])
     return {
         "criterion": "p2_line_end_to_end",
         "acceptance": "全環境で、処理した本のうち、バーコードが読める向きの本は全部、A が取り出して台に置き、B が行き先へ届けた"
                       "（本棚は棚の中で、flat なら背が手前で平ら・standing なら立っている。廃棄箱は箱の中で平ら）。"
-                      "棚に置いた本は inventory.sqlite に記録した",
+                      "棚に置いた本は inventory.sqlite に記録した。B（台車と腕）が廃棄箱・保留棚・査定台に触れた歩数が 0（B15）",
+        "b_contacts": contact,
         "shelf_mode": args.shelf_mode,
         "acceptance_ok": acceptance_ok,
         "books_succeeded_per_env": n_ok, "books_expected_per_env": expected, "shelved_ok_per_env": shelved_ok,
@@ -392,6 +536,10 @@ def run(args, run_id: str, out: Path, bus: Bus, obs: Observer, ctx: dict) -> dic
         "stopped_at_book": stopped_at,
         "injected": {"camera_dirty_from": args.inject_camera_dirty_from},
         "stage_rates_env0": stage_rates(per_book, catalog),
+        "hold_table": None if ht is None else {"rule": dataclasses.asdict(HOLD_RULE[0]),
+                                               "books_per_env": [[b["book_id"] for b in obs.box(i).hold] for i in range(n)],
+                                               "top_per_env": [None if HOLD_TOP.get(i) is None else dataclasses.asdict(HOLD_TOP[i])
+                                                               for i in range(n)]},
         "sim_time_s": world.sim_time, "wall_build_s": build_s, "wall_run_s": wall,
         "site": site.raw, "per_book": per_book,
     }
@@ -433,7 +581,7 @@ def run_parallel(args, n, pile, common, gates, obs, bus, world, line_stopped) ->
             # 待っても空かないので待たない（g_process_a が tray_full として飛ばす。--sequential と同じ扱い）
             waited = False
             while any(gates[i].free_slot() is None for i in range(n) if not obs.is_stopped(i)):
-                if state.get("b_idle") and not any(gates[i].pickable() for i in range(n)):
+                if state.get("b_idle") and not any(gates[i].pickable() or gates[i].holdable() for i in range(n)):
                     break
                 if not waited:
                     bus.publish("robot-a-pick", "observer", "event", "line.waiting", {"reason": "tray_full", "at_book": k})
@@ -495,7 +643,9 @@ def cycle_summary(per_book: list[dict], sim_time: float) -> dict:
 
 def g_b_wait(rb, steps: int = 120):
     """B の腕を待機の形（B_WAIT_ARM）にたたむ。点検カメラの視野から手を出すため"""
+    _phase("b_wait_arm")
     yield from g_joints(rb, rb.arm, np.tile(B_WAIT_ARM, (rb.n, 1)), steps)
+    _phase("b_idle")
 
 
 def g_process_a(k, idx, books, pile, site, shelf, keeper, keeper_ent, tb, bn, station, rbs, ra, rb, world, cams, gates,
@@ -554,7 +704,9 @@ def g_process_a(k, idx, books, pile, site, shelf, keeper, keeper_ent, tb, bn, st
     # ---- 点検カメラ: 本へ向けてバーコードを読む ----
     isbn = [None] * n
     up_z = mb[:, 2, 2]
-    rec["expected_flow"] &= up_z > 0  # 裏向きの本は裏返し（未実装）が要るので、届かなくても失敗に数えない
+    hold_on = "hold_table" in site.raw
+    if not hold_on:  # 裏向きの本は裏返し（未実装）が要るので、届かなくても失敗に数えない（保留棚があれば保留棚へ届く）
+        rec["expected_flow"] &= up_z > 0
     if alive[0]:
         cam = cams["barcode"]
         view = max(w, h) + 0.03
@@ -566,7 +718,8 @@ def g_process_a(k, idx, books, pile, site, shelf, keeper, keeper_ent, tb, bn, st
         if camera_dirty:
             rgb = dirty_lens(rgb)
             rec["injected"] = "camera_dirty"
-            rec["expected_flow"][0] = False  # わざと読めなくした本は、届かないのが正しい
+            if not hold_on:
+                rec["expected_flow"][0] = False  # わざと読めなくした本は、届かないのが正しい（保留棚があれば保留棚へ届く）
         Image.fromarray(rgb).save(out / f"barcode_{spec.book_id}_env0.png")
         isbn[0] = decode_isbn(rgb)
         rec["barcode_view_m"] = view
@@ -634,11 +787,31 @@ def process_book_b(st, k, idx, books, pile, site, shelf, keeper, keeper_ent, tb,
             zone["table"] = None
 
     rec.setdefault("t_sim", {})["b_start"] = world.sim_time
+    # ---- B: 査定できなかった本は、保留棚に積めるかを確かめる（取る前に。B14） ----
+    ht = site.raw.get("hold_table")
+    to_hold_ok = np.zeros(n, bool)
+    hold_plans: list = [None] * n
+    for i in range(n):
+        it = gates[i].items.get(spec.book_id)
+        if ht is None or obs.is_stopped(i) or it is None or it.state != HELD or it.hold_reason not in HOLDABLE:
+            continue
+        plan = hold_plans[i] = plan_stack(ht["center"], ht["size"], ht["top"], HOLD_TOP.get(i), t, HOLD_RULE[0])
+        if plan.ok:
+            gates[i].release_to_hold(spec.book_id)
+            to_hold_ok[i] = True
+        else:
+            # 積むと崩れるおそれがある・高さの上限。取らずに台に残す（オブザーバが箱ごと止める）
+            bus.publish("robot-b-sort", "observer", "event", "escalation",
+                        {"env": i, "book_id": spec.book_id, "reason": FULL_REASON, "why": plan.reason})
+            gates[i].on_escalated(spec.book_id, FULL_REASON)
+            rec["expected_flow"][i] = False
+    if ht is not None:
+        rec["hold_plan"] = [None if pl is None else dataclasses.asdict(pl) for pl in hold_plans]
     # ---- B: 許可を確かめて取る ----
     cleared = np.zeros(n, bool)
     dest = [None] * n
     for i in range(n):
-        if not alive[i]:
+        if not (alive[i] or to_hold_ok[i]):
             continue
         rel = {it.book_id: it for it in gates[i].pickable()}
         if spec.book_id in rel:
@@ -646,19 +819,21 @@ def process_book_b(st, k, idx, books, pile, site, shelf, keeper, keeper_ent, tb,
             cleared[i] = True
     for i in range(n):
         it = gates[i].items.get(spec.book_id)
-        if alive[i] and not cleared[i] and it is not None and it.hold_reason == "shelf_full":
+        if alive[i] and not cleared[i] and it is not None and it.hold_reason in ("shelf_full", FULL_REASON):
             rec["expected_flow"][i] = False  # 本棚に空きが無くて台に残した本は、届かないのが正しい（--shelf-capacity）
     rec["cleared"] = cleared
     rec["destination"] = dest
     if not cleared.any():
         leave_table()
         return rec
+    _phase("b_home_before_pick")
     run_generators(world, [g_home(rb, 120)])  # 待機の形から HOME へ（取る動きは HOME から始める）
     rb.freeze(~cleared)
     o_b: dict = {}
     standing = shelf_mode == "standing" and any(dd == "shelf" for dd in dest)
     off = shelve_grip_offset(spec, HAND, keeper) if standing else 0.0
     rec["b_grip_off_mm"] = None if off is None else off * 1000
+    _phase("b_pick")
     run_generators(world, [g_pick(rb, book, spec, o_b, surface_z=tb["top"], carry_bottom_z=tb["top"] + 0.10,
                                   plate_mode=PLATE_MODE, claw_mode=CLAW_MODE, grip_off=off or 0.0)])
     grip_b = o_b["grip"]
@@ -671,12 +846,24 @@ def process_book_b(st, k, idx, books, pile, site, shelf, keeper, keeper_ent, tb,
         rb.freeze(~to_bin)
         # 関節空間で運ぶ（手先の直線で運ぶと、台から廃棄箱へ向きを変える途中で本を落とした。20261023T010753）
         mv: dict = {}
-        run_generators(world, [g_move_book_joint(rb, grip_b, np.tile(bn["center"], (n, 1)), grip_b.quat,
-                                                 bn["wall_h"] + 0.05, out=mv)])
+        _phase("bin_move")
+        # 置く位置: 廃棄箱の中心から、どの本も同じだけ B と反対の側（-x）へずらす（BIN_DROP_SHIFT。B15）
+        drop = np.tile(np.asarray(bn["center"], float) + np.array([-BIN_DROP_SHIFT, 0.0]), (n, 1))
+        rec["bin_drop_xy"] = drop
+        g_lift_and_swing(rb, grip_b, drop, np.full(n, SWING_BOTTOM_Z), world, mv)
         leave_table()  # 本を持って廃棄箱の上へ移った
         # 廃棄箱の本は積み重なる。置く面は、これまでに入れた本の上面の最も高い所（実測）
         surf = np.array([BIN_TOP.get(i, bn["floor"]) for i in range(n)])
-        run_generators(world, [g_place_flat(rb, grip_b, surf, o_b)])
+        _phase("bin_place")
+        # 放すときは本棚と同じく、今の位置から少しだけ開いて真上へ抜く（全開にすると爪の側の指が B の側の壁へ寄る）
+        run_generators(world, [g_place_flat(rb, grip_b, surf, o_b, release_open=BIN_RELEASE_OPEN)])
+        _phase("bin_home")
+        # 廃棄箱の上から関節空間で HOME へ戻すと、背の外へ出た爪が B の側の壁（+x）の上の縁をこすった
+        # （20261101T011312-c1e311。手先は廃棄箱の中心の真上・高さ 0.33 m）。0.45 m まで上げても、HOME への途中で手が下がり、
+        # 指と爪が査定台の側の壁（-y）の上の縁に触れた（20261101T012110-5de487）。手先を HOME_LIFT_Z まで真上へ上げてから戻す
+        g_up = rb.gripper.get_pos().cpu().numpy()
+        g_up[:, 2] = np.maximum(g_up[:, 2], HOME_LIFT_Z)
+        run_generators(world, [g_cart_chain(rb, g_up, rb.gripper.get_quat().cpu().numpy(), 60, n_way=6, profile=min_jerk)])
         run_generators(world, [g_home(rb, 120)])
         pb, mb = book_frame(book)
         in_bin = ((np.abs(pb[:, 0] - bn["center"][0]) < bn["inner"][0] / 2) & (np.abs(pb[:, 1] - bn["center"][1]) < bn["inner"][1] / 2)
@@ -684,7 +871,12 @@ def process_book_b(st, k, idx, books, pile, site, shelf, keeper, keeper_ent, tb,
         delivered |= to_bin & in_bin
         for i in np.nonzero(to_bin & in_bin)[0]:
             BIN_TOP[int(i)] = max(BIN_TOP.get(int(i), bn["floor"]), float(pb[i, 2] + t / 2))
-        rec["bin"] = {"move": mv, "place": o_b.get("place", {}), "surface_z": surf, "in_bin_flat": in_bin}
+        rec["bin"] = {"move": mv, "place": o_b.get("place", {}), "surface_z": surf, "in_bin_flat": in_bin,
+                      "book_pos": pb, "book_x_axis_xy": mb[:, :2, 0]}
+    to_hold = np.array([d == HOLD for d in dest]) & cleared
+    if to_hold.any():
+        rec["hold"] = place_on_hold(rb, grip_b, book, spec, ht, world, to_hold, hold_plans, o_b, leave_table)
+        delivered |= to_hold & rec["hold"]["in_hold_flat"]
     if to_shelf.any():
         rb.unfreeze()
         rb.freeze(~to_shelf)
@@ -700,6 +892,11 @@ def process_book_b(st, k, idx, books, pile, site, shelf, keeper, keeper_ent, tb,
         if not cleared[i]:
             continue
         gates[i].on_delivered(spec.book_id, bool(delivered[i]))
+        if dest[i] == HOLD:  # 査定できなかった本。保留棚へ届いたら成功（人が判断する）。査定額は無い
+            why = gates[i].items[spec.book_id].hold_cause
+            _result(bus, "robot-b-sort", i, spec, isbn[i], "succeeded" if delivered[i] else "rejected", HOLD, 0,
+                    why if delivered[i] else f"not_delivered_to_{HOLD}")
+            continue
         d = decisions[i]
         _result(bus, "robot-b-sort", i, spec, isbn[i], "succeeded" if delivered[i] else "rejected", dest[i],
                 d.value_jpy, d.reason if delivered[i] else f"not_delivered_to_{dest[i]}")
@@ -757,11 +954,18 @@ def _drive_to_shelf(rb, grip, book, shelf, rbs, world, bus, rec: dict) -> None:
     bp = rb.base_pose()
     fwd = np.stack([np.cos(bp[:, 2]), np.sin(bp[:, 2]), np.zeros(n)], -1)
     left = np.stack([-np.sin(bp[:, 2]), np.cos(bp[:, 2]), np.zeros(n)], -1)
+    _phase("shelf_tuck")
     tuck = np.concatenate([bp[:, :2], np.zeros((n, 1))], -1) + fwd * 0.25 + left * 0.30
     run_generators(world, [g_move_book(rb, grip, tuck, bottom_z=shelf.stand_h + 0.20)])
     front = shelf.front_pose()
     bus.publish("robot-b-sort", "observer", "event", "base.drive", {"to": "shelf", "shelf_id": shelf.shelf_id, "pose": front})
-    run_generators(world, [g_drive(rb, front, rbs["max_speed"], rbs["max_yaw_rate"], DT)])
+    _phase("drive_to_shelf")
+    # station_approach まで向きを変えずに下がり、そこで向きを変えてから本棚へ（B15。site.b_route）
+    route = b_route(rbs, rb.target[0, rb.base], front)
+    rec["route"] = route
+    for wp in route[1:]:
+        run_generators(world, [g_drive(rb, wp, rbs["max_speed"], rbs["max_yaw_rate"], DT)])
+    _phase("at_shelf")
     bp = rb.base_pose()
     rec["base_err_m"] = np.linalg.norm(bp[:, :2] - np.array(front[:2]), axis=1)
     rec["still_held_after_drive"] = touching(rb, book)
@@ -769,13 +973,68 @@ def _drive_to_shelf(rb, grip, book, shelf, rbs, world, bus, rec: dict) -> None:
 
 def _drive_to_station(rb, station, rbs, world) -> None:
     """本棚から待機位置へ戻る。待機位置の手前の点（station_approach）を通る（まっすぐ戻ると廃棄箱に当たることがある）。"""
-    ap = rbs.get("station_approach")
-    if ap is not None:
-        run_generators(world, [g_drive(rb, (ap[0], ap[1], float(station[2])), rbs["max_speed"], rbs["max_yaw_rate"], DT)])
-    run_generators(world, [g_drive(rb, tuple(station), rbs["max_speed"], rbs["max_yaw_rate"], DT)])
+    _phase("drive_to_station")
+    # 行きと同じ道を逆に: station_approach まで本棚を向いたまま進み、そこで向きを変えてから待機位置へ（B15）
+    for wp in b_route(rbs, rb.target[0, rb.base], station)[1:]:
+        run_generators(world, [g_drive(rb, wp, rbs["max_speed"], rbs["max_yaw_rate"], DT)])
 
 
 BIN_TOP: dict = {}  # 環境ごとの、廃棄箱に入れた本の上面の最も高い所（世界の z。置いた後に測った値）
+HOLD_TOP: dict = {}  # 環境ごとの、保留棚のいちばん上の本（hold.TopBook。置いた後に測った値）
+HOLD_RULE: list = [StackRule()]  # 保留棚に積むときの判定（--hold-max-stack-m で高さの上限を変える）
+# 査定台から廃棄箱・保留棚へ運ぶときの本の底の高さ（床から）。台から 0.10 m 上のまま関節空間で振ると、途中で手が下がり、
+# 爪が査定台に・指が廃棄箱の壁に触れた（20261101T003116-6d04d8 の book-09。B15）。先に真上へ持ち上げる。
+# 0.30 m（壁の上 0.10 m）でも、関節空間の途中で手が約 0.10 m 下がって爪が壁の上の縁に触れた（20261101T012110-5de487）
+SWING_BOTTOM_Z = 0.30
+HOME_LIFT_Z = 0.55  # 廃棄箱に置いた後、HOME へ戻す前に手先を上げる高さ（床から）
+BIN_RELEASE_OPEN = 0.010  # 廃棄箱で放すときに指を開く量（全開にすると壁に当たる）
+# 爪を本の底から抜くと、爪は背の外へ約 0.12 m 出る。B は待機位置（廃棄箱の +x の側）から手を伸ばすので、爪はいつも
+# B の側（+x）へ出る。廃棄箱の中心に置いた book-09（幅 148 mm）では、爪が B の側の壁に本の底の高さで当たった
+# （20261101T010202-3ddad7）。どの本も同じだけ -x へずらす（本ごとに変えると下の本と揃わず、爪が本と本の間に挟まって
+# book-09 を引きずり落とした。20261101T013929-236126）。0.03 m ずらすと、下ろす途中で腕が届く限りに近づいて手が 0.11 m 横へずれ、
+# 本を落とした（20261101T014948-374fee）。廃棄の本で一番幅の広い book-09 で、背 + 爪 = 0.133 m < 壁 0.15 m
+BIN_DROP_SHIFT = 0.015
+
+
+def g_lift_and_swing(rb, grip, center_xy, bottom_z, world, out: dict) -> None:
+    """持った本を、いまの位置の真上へ SWING_BOTTOM_Z（と bottom_z の高い方）まで持ち上げ、関節空間で center_xy の上へ運ぶ"""
+    pb = grip.book.get_pos().cpu().numpy()
+    lift = float(max(SWING_BOTTOM_Z, float(np.max(bottom_z))))
+    run_generators(world, [g_move_book(rb, grip, pb[:, :2], steps=80, bottom_z=lift)])
+    run_generators(world, [g_move_book_joint(rb, grip, center_xy, grip.quat, bottom_z, out=out)])
+
+
+def place_on_hold(rb, grip, book, spec, ht, world, mask, plans, o_b, leave_table) -> dict:
+    """持った本を保留棚へ平らに置く（廃棄箱と同じ置き方）。置く位置は、いちばん上の本の中心（1 冊目は台の中心）。
+    置いた後に、平らで台（山）の上にあるかを測り、いちばん上の本（HOLD_TOP）を更新する"""
+    n = world.n
+    w, h, t = spec.size_m
+    rb.unfreeze()
+    rb.freeze(~mask)
+    tgt = np.array([plans[i].target_xy if mask[i] else ht["center"] for i in range(n)], float)
+    surf = np.array([plans[i].surface_z if mask[i] else ht["top"] for i in range(n)], float)
+    mv: dict = {}
+    _phase("hold_move")
+    # 廃棄箱と同じく、真上へ持ち上げてから関節空間で運ぶ。運ぶ本の底は、山の上面の 50 mm 上か、床から 0.30 m の高い方
+    g_lift_and_swing(rb, grip, tgt, np.maximum(surf + 0.05, SWING_BOTTOM_Z), world, mv)
+    leave_table()  # 本を持って保留棚の上へ移った
+    _phase("hold_place")
+    run_generators(world, [g_place_flat(rb, grip, surf, o_b)])
+    _phase("hold_home")
+    run_generators(world, [g_home(rb, 120)])
+    pb, mb = book_frame(book)
+    tilt = np.degrees(np.arccos(np.clip(np.abs(mb[:, 2, 2]), 0, 1)))
+    on_table = ((np.abs(pb[:, 0] - ht["center"][0]) < ht["size"][0] / 2) & (np.abs(pb[:, 1] - ht["center"][1]) < ht["size"][1] / 2))
+    level = np.abs(pb[:, 2] - (surf + t / 2)) < 0.006
+    ok = mask & on_table & level & (tilt < 3.0)
+    for i in np.nonzero(ok)[0]:
+        i = int(i)
+        HOLD_TOP[i] = TopBook(center_xy=(float(pb[i, 0]), float(pb[i, 1])),
+                              yaw=float(math.atan2(mb[i, 1, 0], mb[i, 0, 0])), size_xy=(float(w), float(h)),
+                              top_z=float(pb[i, 2] + t / 2), tilt_deg=float(tilt[i]))
+    rb.unfreeze()
+    return {"move": mv, "place": o_b.get("place", {}), "surface_z": surf, "target_xy": tgt, "in_hold_flat": ok,
+            "pos_err_mm": np.linalg.norm(pb[:, :2] - tgt, axis=1) * 1000, "tilt_deg": tilt}
 SHELF_BOOKS_X: dict = {}  # 環境ごとの、棚に置いた本の x の範囲（深さカメラを描かない環境の空きを出すため）
 
 

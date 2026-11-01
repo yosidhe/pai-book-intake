@@ -55,6 +55,10 @@ def failed_stage(rec: dict) -> str | None:
         return None
     if not a["on_table"][0]:
         return "pick"
+    if (rec.get("destination") or [None])[0] == "hold":  # 査定できなかった本（保留棚へ。B14）。読めなかったことは row の to_hold に出す
+        if not (rec.get("b_pick") or {}).get("lifted", [True])[0]:
+            return "transport"
+        return None if rec.get("hold", {}).get("in_hold_flat", [False])[0] else "hold"
     if "isbn_read" in rec and rec["isbn_read"][0] is None:
         return "barcode"
     dest = (rec.get("destination") or [None])[0]
@@ -90,7 +94,8 @@ def digest_p2_line(d: Path) -> dict:
     for rec in r.get("per_book", []):
         st = failed_stage(rec)
         row = {"book_id": rec.get("book_id"), "failed_stage": st, "injected": rec.get("injected"),
-               "face_down": rec.get("book_id") in face_down}  # 裏向き＝読めないのが正しい本
+               "face_down": rec.get("book_id") in face_down,  # 裏向き＝読めないのが正しい本
+               "to_hold": (rec.get("destination") or [None])[0] == "hold"}
         img = d / f"barcode_{rec.get('book_id')}_env0.png"
         if st == "barcode" and img.exists():
             row["image"] = f"{d.name}/{img.name}"
@@ -102,7 +107,11 @@ def digest_p2_line(d: Path) -> dict:
             "stage_rates_env0": r.get("stage_rates_env0"), "books": books,
             "messages": {k: topics[k] for k in ("fix_request", "fix.declined", "escalation", "tray.held", "stop",
                                                  "line.waiting", "line.stopped") if topics[k]},
-            "held": held, "not_implemented": r.get("not_implemented")}
+            "held": held, "not_implemented": r.get("not_implemented"),
+            "hold_table": r.get("hold_table"),
+            # B が障害物に触れた所（B15）。次に学習させる場面（障害物をよけて進む）の候補
+            "b_contacts": {k: (r.get("b_contacts") or {}).get(k) for k in ("total_steps_per_env", "episodes_by_obstacle_phase")}
+            if r.get("b_contacts") else None}
 
 
 def digest_act_eval(d: Path) -> dict:
