@@ -76,3 +76,67 @@ def test_face_down_book_is_given_to_act_as_face_up():
     assert np.allclose(got, up_m)
     assert np.allclose(got[:, :, 0], mixed[:, :, 0])  # 背の向き（x 軸）は変えない
     assert np.allclose(mixed[0, :, 2], [0.0, 0.0, -1.0])  # 渡す前の値は変えない（コピーして直す）
+
+
+class _Tensor:
+    def __init__(self, a):
+        self.a = np.asarray(a, dtype=float)
+
+    def cpu(self):
+        return self
+
+    def numpy(self):
+        return self.a
+
+
+class _Entity:
+    def __init__(self, vels):
+        self.vels = iter(vels)
+        self.vel = None
+
+    def get_dofs_velocity(self):
+        self.vel = next(self.vels)
+        return _Tensor(self.vel)
+
+    def get_qpos(self):
+        return _Tensor([[0.5, 0.1]])
+
+
+class _Robot:
+    n = 1
+    home = np.array([0.5, 0.1])
+    force_now = np.array([[10.0, 20.0]])
+
+    def __init__(self, vels):
+        self.target = np.array([[0.0, 0.0]])
+        self.e = _Entity(vels)
+
+
+def test_settle_home_moves_all_joints_and_waits_until_still():
+    from pai_book_intake.p2_line import g_settle_home
+
+    r = _Robot([[[0.5, 0.0]], [[0.02, 0.0]], [[0.0, 0.009]]])
+    out: dict = {}
+    assert sum(g_settle_home(r, out, steps=4)) == 4 + 2
+    assert np.allclose(r.target, r.home)
+    assert out["settled"] is True and out["waited_steps"] == 2
+    assert np.allclose(out["force_now"], r.force_now)
+
+
+def test_settle_home_gives_up_and_records_it():
+    from pai_book_intake.p2_line import g_settle_home
+
+    r = _Robot([[[0.5, 0.0]]] * 4)
+    out: dict = {}
+    assert sum(g_settle_home(r, out, steps=1, max_wait=3)) == 1 + 3
+    assert out["settled"] is False and out["waited_steps"] == 3
+
+
+def test_act_uses_only_the_first_tray_slot():
+    from pai_book_intake.p2_line import tray_slots_used
+    from pai_book_intake.site import DEFAULT_SITE, load_site
+
+    slots = load_site(DEFAULT_SITE)["appraisal_table"]["slots"]
+    assert slots[0][0] == 0.25
+    assert tray_slots_used("act", slots) == 1
+    assert tray_slots_used("scripted", slots) == len(slots)

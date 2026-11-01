@@ -40,8 +40,9 @@ B（台車と腕）が廃棄箱・保留棚・査定台に触れた歩数を毎�
 置いた本の位置から決める（どちらも結果に source として残す）。
 
 A を ACT で動かす（--a-policy act --ckpt <act_train の checkpoint>。03_ACT組込み計画）
-  - 取り出し → 運搬 → 配置 → 待機姿勢を、学習済みの ACT が 50 Hz で動かす（act_a.act_episode と同じ）。置き場所は台帳の空きから
-    選んで観測に入れる。ACT は途中で止められないので、動かし始める前に査定台を確保する
+  - 取り出し → 運搬 → 配置 → 待機姿勢を、学習済みの ACT が 50 Hz で動かす（act_a.act_episode と同じ）。始める前に全関節を待機姿勢へ
+    戻して止まるまで待つ（学習のときの始め方にそろえる）。置き場所は 1 つ目（0.25）だけを使う（2 つ目は学習のときから変わった）。
+    ACT は途中で止められないので、動かし始める前に査定台を確保する
   - 本の位置と向きは、スクリプト制御と同じく正解値を使う
 
 使い方: python -m pai_book_intake.p2_line --n-envs 1 --books 4
@@ -492,7 +493,8 @@ def run(args, run_id: str, out: Path, bus: Bus, obs: Observer, ctx: dict) -> dic
     station = np.array(site["robot_b"]["station"])
     rbs = site["robot_b"]
     inv = Inventory(out / "inventory.sqlite")
-    gates = [ReleaseGate(bus, catalog, n_slots=len(tb["slots"]), shelf_capacity=args.shelf_capacity, env=i) for i in range(n)]
+    n_slots = tray_slots_used(args.a_policy, tb["slots"])
+    gates = [ReleaseGate(bus, catalog, n_slots=n_slots, shelf_capacity=args.shelf_capacity, env=i) for i in range(n)]
     bus.publish("observer", "*", "note", "run.start",
                 {"n_envs": n, "pile_bottom_to_top": pile_ids, "face_down": sorted(face_down), "site": site.site_id,
                  "shelf": {"shelf_id": shelf.shelf_id, "origin": list(shelf.origin), "yaw": shelf.yaw},
@@ -566,6 +568,7 @@ def run(args, run_id: str, out: Path, bus: Bus, obs: Observer, ctx: dict) -> dic
         "a_policy": args.a_policy,
         "ckpt": ckpt_name(args.ckpt) if args.ckpt else None,
         "ensemble": args.ensemble,
+        "tray_slots_used": n_slots,
         "acceptance_ok": acceptance_ok,
         "books_succeeded_per_env": n_ok, "books_expected_per_env": expected, "shelved_ok_per_env": shelved_ok,
         "inventory": shelf_rows,
@@ -687,6 +690,31 @@ def g_b_wait(rb, steps: int = 120):
 
 
 A_POLICY: dict = {}  # --a-policy act のとき {"policy": act_a.ActPolicy, "steps": 1 冊あたりの制御の回数}
+A_STILL_DOF_VEL = 0.01  # これより遅ければ止まったとみなす（関節の速度。rad/s または m/s）
+A_STILL_MAX_WAIT = 300  # 止まるまで待つ上限の歩数（3 s）。止まらなくても先へ進み、settled=False として残す
+
+
+def tray_slots_used(a_policy: str, slots: list) -> int:
+    """査定台で使う置き場所の数。ACT は学習した置き場所が今も同じ 1 つ目（0.25）だけを使う（2 つ目は学習のときの 0.53 から 0.56 へ変わった）"""
+    return 1 if a_policy == "act" else len(slots)
+
+
+def g_settle_home(r, out: dict, steps: int = 60, max_wait: int = A_STILL_MAX_WAIT):
+    """ACT を始める前に、全関節を待機姿勢へ戻して止まるまで待つ（学習のときの始め方にそろえる）。
+    学習では全関節を待機姿勢に置き直して始める。ここは B と並行に動いているので、置き直さずに動かす。
+    out に、始めるときの A の状態を入れる（学習のときの始まりと比べるため）"""
+    dofs = np.arange(len(r.home))
+    yield from g_joints(r, dofs, np.tile(r.home, (r.n, 1)), steps)
+    waited = 0
+    vel = r.e.get_dofs_velocity().cpu().numpy()
+    while np.abs(vel).max() >= A_STILL_DOF_VEL and waited < max_wait:
+        yield 1
+        waited += 1
+        vel = r.e.get_dofs_velocity().cpu().numpy()
+    q = r.e.get_qpos().cpu().numpy()
+    out.update(settled=bool(np.abs(vel).max() < A_STILL_DOF_VEL), waited_steps=waited, qpos=q,
+               qpos_minus_home_max=np.abs(q - r.home).max(1), dof_vel_max=np.abs(vel).max(1),
+               force_now=r.force_now.copy())
 
 
 def g_act_a(ra, policy, steps: int, book, spec, slot_xy: np.ndarray, out: dict):
@@ -733,17 +761,19 @@ def g_process_a(k, idx, books, pile, site, shelf, keeper, keeper_ent, tb, bn, st
     o: dict = {}
     slot_xy = np.array([tb["slots"][s] for s in slot])
     if A_POLICY:
+        rec["t_sim"] = {"a_start": world.sim_time}
+        start_state: dict = {}
+        yield from g_settle_home(ra, start_state)
         # ACT は動作の途中で止められない（台の手前で待つことを学んでいない）ので、動かし始める前に台を確保する
         if zone is not None:
             while zone.get("table") not in (None, "a"):
                 yield 1
             zone["table"] = "a"
         bus.publish("robot-a-pick", "observer", "event", "pick.start", {"book_id": spec.book_id, "policy": "act"})
-        rec["t_sim"] = {"a_start": world.sim_time}
         yield from g_act_a(ra, A_POLICY["policy"], A_POLICY["steps"], book, spec, slot_xy, o)
         # 待機姿勢へそろえる（ACT が戻りきらないと、点検カメラに手が写る）。戻りきっていれば動かない
         yield from g_home(ra, 60)
-        pick_rec = o["pick"]
+        pick_rec = {**o["pick"], "start_state": start_state}
     else:
         bus.publish("robot-a-pick", "observer", "event", "pick.start", {"book_id": spec.book_id})
         rec["t_sim"] = {"a_start": world.sim_time}
